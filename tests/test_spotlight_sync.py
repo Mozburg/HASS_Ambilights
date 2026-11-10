@@ -641,6 +641,36 @@ assert m.cells_for(_col, _grid, _cells).shape[0] == 22 * 36
 m.aggregate(_stitched)                                     # must not raise
 print("ragged zones ok: 22/21 column blocks stitch into one cell list")
 
+# --- SEND_BRIGHTNESS off: the payload carries no brightness ----------------
+_c = {"rgb": [10, 200, 60], "xy": [0.31, 0.33], "luminance": 0.4}
+_t = m.Target("light.a", frozenset({2}))
+_t.last_attempted = _t.last_sent = (tuple(_c["rgb"]), None)   # sent without brightness
+_t.last_attempt_mono = _t.last_success_mono = time.perf_counter()
+assert m.should_send(_t, _c, 100) is False, "same colour with no brightness must dedupe"
+# and an unanswered attempt with no brightness must not raise either
+_t.last_sent = ((1, 2, 3), None)
+_t.last_attempt_mono = time.perf_counter()
+assert m.should_send(_t, _c, 100) is False
+assert m.should_send(_t, dict(_c, rgb=[120, 20, 20]), 100) is True
+_prev_sb = m.SEND_BRIGHTNESS
+m.SEND_BRIGHTNESS = False
+assert "brightness" not in m.build_payload(_c)
+run_phase(0.7, mode="solid", colour=(10, 200, 60))
+assert m.stats["frame_errors"] == 0, m.stats.get("last_frame_error")
+m.SEND_BRIGHTNESS = _prev_sb
+print("brightness-off ok: dedupe handles a missing brightness, frames clean")
+
+# the counter that surfaces a broken frame without the terminal
+_broken = m.aggregate
+m.aggregate = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+run_phase(0.5, mode="solid")
+m.aggregate = _broken
+assert m.stats["frame_errors"] > 0, "frame errors must be countable"
+assert "boom" in (m.stats["last_frame_error"] or ""), m.stats["last_frame_error"]
+m.stats["frame_errors"] = 0
+m.stats["last_frame_error"] = None
+print("frame error counter ok:", "surfaced as %s" % m.stats["frame_errors"])
+
 # --- browser furniture: favicon + the non-deprecated mss factory -----------
 _fav = m.favicon()
 assert getattr(_fav, "status_code", 200) == 204, "favicon should be a quiet 204"

@@ -538,7 +538,7 @@ UI_HTML = r"""<!DOCTYPE html>
           <div class="kv"><b>prep</b><span id="s-prep">–</span></div>
           <div class="kv"><b>cycle</b><span id="s-cycle">–</span></div>
           <div class="kv"><b>pace / transition</b><span id="s-pace">–</span></div>
-          <div class="kv"><b>busy · stalls · timeouts</b><span id="s-err">–</span></div>
+          <div class="kv"><b>busy · stalls · timeouts</b><span id="s-err" title="">–</span></div>
           <div class="kv"><b>idle</b><span id="s-idle">–</span></div>
           <div class="kv"><b>calibration</b><span id="s-cal">–</span></div>
         </div>
@@ -1142,7 +1142,9 @@ async function tick() {
     $("s-prep").textContent = s.prep_ms != null ? s.prep_ms.toFixed(1) + " ms" : "–";
     $("s-cycle").textContent = s.cycle_ms != null ? s.cycle_ms.toFixed(0) + " ms" : "–";
     $("s-pace").textContent = (s.pace_ms ?? "–") + " ms / " + (s.transition ?? "–") + " s";
-    $("s-err").textContent = `${s.busy ?? 0} · ${s.radio_stalls ?? 0} · ${s.timeouts ?? 0}`;
+    $("s-err").textContent = `${s.busy ?? 0} · ${s.radio_stalls ?? 0} · ${s.timeouts ?? 0}`
+      + (s.frame_errors ? ` · ${s.frame_errors} frame errors` : "");
+    $("s-err").title = s.last_frame_error ? "last frame error: " + s.last_frame_error : "";
     $("s-idle").textContent = s.idle ? "yes" : "no";
     if (s.calibrating) $("s-cal").textContent = "running…";
     else if (s.calibration) {
@@ -1530,7 +1532,8 @@ stats = {"posts": 0, "frames": 0, "dropped": 0, "rtt_ms": None, "interval_ms": N
          "transition": None, "errors": 0, "busy": 0, "pace_ms": None,
          "age_ms": None, "max_age_ms": None, "saturation_k": None,
          "prep_ms": None, "idle": False, "cycle_ms": None, "crop": None,
-         "timeouts": 0, "radio_stalls": 0,
+         "timeouts": 0, "radio_stalls": 0, "frame_errors": 0,
+         "last_frame_error": None,
          "calibrating": False, "calibration": None}
 _last_error_log = 0.0
 
@@ -1809,7 +1812,12 @@ def should_send(target: Target, colour: dict, brightness: int) -> bool:
     if last is None:
         return True
     d_e = delta_e(colour["rgb"], last[0])
-    if d_e >= MIN_DELTA_E or abs(brightness - last[1]) >= MIN_BRIGHTNESS_DELTA:
+    if d_e >= MIN_DELTA_E:
+        return True
+    # With SEND_BRIGHTNESS off the payload carries no brightness, so the last
+    # attempt recorded None: comparing against it raised TypeError on every
+    # frame. Nothing to compare means there is nothing brightness could change.
+    if last[1] is not None and abs(brightness - last[1]) >= MIN_BRIGHTNESS_DELTA:
         return True
     # Same colour as the last attempt. Re-send only when that attempt is still
     # unconfirmed, and never sooner than RESEND_AFTER after the attempt itself:
@@ -2470,6 +2478,8 @@ def capture_loop() -> None:
             if batch:
                 send_to_ha(batch)
         except Exception as exc:                 # never let one bad frame kill the thread
+            stats["frame_errors"] += 1
+            stats["last_frame_error"] = f"{type(exc).__name__}: {exc}"
             log.error("Frame error: %s", exc)
 
         stop_event.wait(max(0.0, (idle_interval if stats["idle"] else interval)

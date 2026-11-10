@@ -8,6 +8,24 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-10
+
+### Added
+- **Auto tune** in the Sending card (and `--autotune`): sends a short burst at
+  decreasing intervals, finds the fastest pacing the radio accepts without
+  rejecting commands, and applies `POST_INTERVAL_FLOOR`/`CEILING` live. The light is
+  put back afterwards, and the result says where the queue gave up.
+
+### Fixed
+- The live panel and the 3×3 strip rebuilt their DOM on every poll, which made the
+  mouse cursor flicker over the page (worst in the WebView2 window). They now update
+  in place and only write values that changed.
+- `restore_light` only recognised xy and colour-temperature read-backs, so an
+  `rgb_color` restore was reported as failed and retried three times.
+- Auto tune (and any live edit) triggered the "config.json is overriding environment
+  settings" banner, which is only true for values actually saved to the file.
+- The new screenshot shows the current UI.
+
 ## [2.0.0] — 2026-11-10
 
 Renamed to **Hass Ambilights**, and shipped as a Windows desktop app.

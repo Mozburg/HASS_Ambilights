@@ -187,7 +187,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1000,6 +1000,21 @@ function renderSettings() {
       box.append(summary, inner);
       body.appendChild(box);
     }
+    if (group === "Sending") {
+      const tune = document.createElement("div");
+      tune.className = "actions";
+      tune.style.padding = "10px 0 0";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "btn"; btn.id = "autotune";
+      btn.textContent = "Auto tune…";
+      btn.title = "Measure the fastest pacing these lights accept";
+      const status = document.createElement("span");
+      status.className = "mono"; status.id = "autotunestatus";
+      status.style.fontSize = "12px";
+      btn.onclick = autotuneNow;
+      tune.append(btn, status);
+      body.appendChild(tune);
+    }
     if (group === "Home Assistant") {
       // test the URL/token where they are edited, not in a separate strip
       const conn = document.createElement("div");
@@ -1220,34 +1235,95 @@ function hexFromXy(x, y) {
   return "#" + lin.map((v) => Math.round(enc(v) * 255).toString(16).padStart(2, "0")).join("");
 }
 
+// Write only when the value actually differs: a value that is set to what it
+// already was still costs a style recalculation, and on WebView2 a page that is
+// rebuilt every second makes the mouse cursor flicker as hit-testing resets.
+function setText(node, value) {
+  const text = String(value);
+  if (node.textContent !== text) node.textContent = text;
+}
+
+function setBackground(node, colour) {
+  // compare what we last set: the browser normalises hex to rgb() when read back,
+  // so reading style.backgroundColor never matches the value we passed in
+  if (node.dataset.bg === colour) return;
+  node.dataset.bg = colour;
+  node.style.background = colour;
+}
+
+function setTitle(node, text) {
+  if (node.title !== text) node.title = text;
+}
+
+const LIVE_ROWS = new Map();          // entity id -> the row built for it
+
+function liveRow(entity) {
+  let row = LIVE_ROWS.get(entity);
+  if (row) return row;
+  const block = document.createElement("div");
+  block.className = "lightlive";
+  block.dataset.entity = entity;
+  const name = document.createElement("div");
+  name.className = "name";
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  const mini = document.createElement("span");
+  mini.className = "mini";
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  bar.append(mini, meta);
+  const counters = document.createElement("div");
+  counters.className = "meta";
+  block.append(name, bar, counters);
+  row = { block, name, mini, meta, counters };
+  LIVE_ROWS.set(entity, row);
+  return row;
+}
+
 function renderLightLive(health) {
   const host = $("lightlive");
   const lights = (health && health.lights) || [];
-  host.innerHTML = "";
   if (!lights.length) {
-    host.innerHTML = '<div class="lightlive"><div class="name">no lights configured</div></div>';
+    if (!host.querySelector(".lightlive.empty")) {
+      host.innerHTML = '<div class="lightlive empty"><div class="name">no lights configured</div></div>';
+    }
     return;
   }
-  lights.forEach((l) => {
+  const placeholder = host.querySelector(".lightlive.empty");
+  if (placeholder) placeholder.remove();
+
+  const seen = new Set();
+  lights.forEach((l, index) => {
     const colour = l.colour || null;
     const hex = colour && colour.preview ? colour.preview.hex
       : (colour && colour.xy ? hexFromXy(colour.xy[0], colour.xy[1]) : null);
     const sent = l.last_sent;
-    const block = document.createElement("div");
-    block.className = "lightlive";
-    block.innerHTML =
-      `<div class="name" title="${esc(l.entity)}">${esc(l.entity)}</div>
-       <div class="bar">
-         <span class="mini" style="background:${hex || "#111"}"></span>
-         <span class="meta">${hex || "no frame yet"}
-           ${colour && colour.preview ? "· bri " + colour.preview.brightness
-             : (sent && sent.brightness != null ? "· bri " + sent.brightness : "")}
-           · ${esc((l.zones || []).join(",")) || "all"}</span>
-       </div>
-       <div class="meta">${l.posts} posts · ${l.busy} busy · ${l.errors} errors</div>`;
-    host.appendChild(block);
+    const row = liveRow(l.entity);
+    seen.add(l.entity);
+
+    if (row.name.textContent !== l.entity) {
+      row.name.textContent = l.entity;
+    }
+    setTitle(row.name, l.entity);
+    setBackground(row.mini, hex || "#111");
+    const brightness = colour && colour.preview ? colour.preview.brightness
+      : (sent && sent.brightness != null ? sent.brightness : null);
+    setText(row.meta, (hex || "no frame yet")
+      + (brightness != null ? " · bri " + brightness : "")
+      + " · " + ((l.zones || []).join(",") || "all"));
+    setText(row.counters, `${l.posts} posts · ${l.busy} busy · ${l.errors} errors`);
+
+    // keep order without moving nodes that are already in place
+    if (host.children[index] !== row.block) host.insertBefore(row.block, host.children[index] || null);
+
     const chip = document.querySelector(`.chip[data-chip="${CSS.escape(l.entity)}"]`);
-    if (chip && hex) chip.style.background = hex;
+    if (chip && hex) setBackground(chip, hex);
+  });
+
+  [...LIVE_ROWS.keys()].forEach((entity) => {
+    if (seen.has(entity)) return;
+    LIVE_ROWS.get(entity).block.remove();
+    LIVE_ROWS.delete(entity);
   });
 }
 
@@ -1297,11 +1373,11 @@ async function tick() {
         const cell = zb.children[i];
         const p = z && z.preview;
         const hex = p ? p.hex : (z && z.xy ? hexFromXy(z.xy[0], z.xy[1]) : null);
-        cell.style.background = hex || "#222932";
+        setBackground(cell, hex || "#222932");
         // the swatch is the payload colour at the brightness that gets sent
-        cell.title = `zone ${i + 1}` + (p
+        setTitle(cell, `zone ${i + 1}` + (p
           ? ` · ${p.hex} · brightness ${p.brightness} · xy ${p.xy[0]}, ${p.xy[1]}`
-          : " · no data");
+          : " · no data"));
       });
       markUsedZones();
     }
@@ -1331,6 +1407,44 @@ on("refreshlights", "click", async () => {
   toast((ENTITIES.ok ? `${ENTITIES.count} light(s) loaded` : "Could not load lights: " + ENTITIES.detail),
         !ENTITIES.ok);
 });
+async function autotuneNow() {
+  const status = $("autotunestatus");
+  if (!confirm("Auto tune sends a short burst of commands to the first light, "
+             + "brightening and dimming it for about ten seconds, then picks the "
+             + "fastest pacing it accepted.\n\nContinue?")) return;
+  $("autotune").disabled = true;
+  status.textContent = "measuring…";
+  try {
+    const r = await fetch("/api/autotune", { method: "POST" });
+    const data = await r.json();
+    if (!data.ok) { status.textContent = "✖ " + (data.error || "could not start"); return; }
+    for (let i = 0; i < 120; i++) {
+      await new Promise((res) => setTimeout(res, 500));
+      const h = await fetch("/health").then((x) => x.json());
+      const s = h.stats || {};
+      if (s.autotuning) continue;
+      const report = s.autotune || {};
+      if (report.ok) {
+        const message = `✔ ${report.floor.toFixed(2)}–${report.ceiling.toFixed(2)} s`
+          + (report.busy_at_ms ? ` (rejected at ${report.busy_at_ms} ms)` : " (no rejections)");
+        await reload();                 // applied live; the badge asks you to save
+        const fresh = $("autotunestatus");   // reload rebuilds the card
+        if (fresh) { fresh.textContent = message; fresh.style.color = "var(--ok)"; }
+      } else {
+        status.textContent = "✖ " + (report.error || "no result");
+        status.style.color = "var(--bad)";
+      }
+      return;
+    }
+    status.textContent = "✖ timed out";
+  } catch (e) {
+    status.textContent = "✖ " + e.message;
+    status.style.color = "var(--bad)";
+  } finally {
+    $("autotune").disabled = false;
+  }
+}
+
 async function testConnection() {
   const body = { HA_URL: CFG.HA_URL };
   const typed = (CFG.HA_TOKEN && CFG.HA_TOKEN !== "<set>" && CFG.HA_TOKEN !== "--clear--")
@@ -1758,7 +1872,8 @@ stats = {"posts": 0, "frames": 0, "dropped": 0, "rtt_ms": None, "interval_ms": N
          "prep_ms": None, "idle": False, "cycle_ms": None, "crop": None,
          "timeouts": 0, "radio_stalls": 0, "frame_errors": 0,
          "last_frame_error": None,
-         "calibrating": False, "calibration": None}
+         "calibrating": False, "calibration": None,
+         "autotuning": False, "autotune": None}
 _last_error_log = 0.0
 
 session = requests.Session()
@@ -2451,10 +2566,18 @@ def restore_light(restore: dict, attempts: int = 3) -> bool:
             attrs = session.get(f"{HA_URL}/api/states/{restore['entity_id']}", headers=auth_headers(), timeout=5).json().get("attributes", {})
         except requests.RequestException:
             continue
+        # accept the mode that matches what we asked for: an rgb restore reports
+        # "rgb", not "xy", and used to look like a failure and be retried 3x
         if "xy_color" in restore:
-            if attrs.get("color_mode") == "xy":
-                return True
-        elif attrs.get("color_mode") == "color_temp":
+            expected = {"xy"}
+        elif "rgb_color" in restore:
+            expected = {"rgb", "rgbw", "rgbww", "rgbx", "hs", "xy"}
+        elif "color_temp_kelvin" in restore or "kelvin" in restore:
+            expected = {"color_temp"}
+        else:
+            expected = None                      # brightness-only: nothing to compare
+        mode = attrs.get("color_mode")
+        if expected is None or mode in expected:
             return True
     log.warning("Light may not have been fully restored to %s", restore)
     return False
@@ -2484,6 +2607,126 @@ CALIBRATION_SET = [
 
 
 CALIBRATION_LOCK = threading.Lock()
+
+
+AUTOTUNE_LOCK = threading.Lock()
+POST_INTERVAL_FLOOR_MIN = 0.10      # fastest the tuner will allow
+POST_INTERVAL_CEILING_MAX = 2.00
+AUTOTUNE_STEPS = (0.45, 0.35, 0.26, 0.20, 0.15, 0.12, 0.09, 0.07)
+
+
+def autotune(verbose: bool = True, per_step: int = 5) -> dict:
+    """Stress the lights and pick a pacing they accept without dropping commands.
+
+    The radio is the bottleneck, not the host: a Zigbee group starts answering
+    "queue BUSY" somewhere around five or six commands a second. Rather than make
+    people guess POST_INTERVAL_FLOOR, send a burst at decreasing intervals and
+    keep the fastest one that came back clean. The light is restored afterwards.
+    """
+    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
+    report = {
+        "entity": entity,
+        "dry_run": DRY_RUN,
+        "steps": [],
+        "floor": None,
+        "ceiling": None,
+        "best_ms": None,
+        "busy_at_ms": None,
+        "applied": {},
+        "restored": False,
+        "ok": False,
+        "error": None,
+    }
+    say = print if verbose else (lambda *a, **k: None)
+
+    if DRY_RUN:
+        report["error"] = "dry run is on: nothing is sent, so there is nothing to measure"
+        return report
+    if not check_ha():
+        report["error"] = "Home Assistant is unreachable or the token was rejected"
+        return report
+
+    try:
+        attrs = session.get(f"{HA_URL}/api/states/{entity}", headers=auth_headers(),
+                            timeout=5).json().get("attributes", {})
+    except requests.RequestException as exc:
+        report["error"] = f"could not read the light's current state: {exc}"
+        return report
+    restore = {
+        "entity_id": entity,
+        "rgb_color": attrs.get("rgb_color") or [255, 200, 120],
+        "brightness": attrs.get("brightness") or 140,
+        "transition": 0,
+    }
+
+    basis = report.get("floor") or POST_INTERVAL_FLOOR
+    accepted = []
+    try:
+        for interval in AUTOTUNE_STEPS:
+            ok = busy = 0
+            rtts = []
+            for n in range(per_step):
+                body = {"entity_id": entity, "rgb_color": [255, 190, 110],
+                        "brightness": 120 if n % 2 else 200, "transition": 0}
+                started = time.perf_counter()
+                try:
+                    response = _post(body, timeout=REQUEST_TIMEOUT)
+                except requests.RequestException as exc:
+                    report["steps"].append({"interval_ms": round(interval * 1000),
+                                            "ok": ok, "busy": busy + 1,
+                                            "rtt_ms": None, "error": str(exc)[:80]})
+                    busy += 1
+                    break
+                rtts.append((time.perf_counter() - started) * 1000.0)
+                if response.ok:
+                    ok += 1
+                elif is_queue_busy(response.text):
+                    busy += 1
+                else:
+                    busy += 1
+                time.sleep(interval)
+            step = {"interval_ms": round(interval * 1000), "ok": ok, "busy": busy,
+                    "rtt_ms": round(sorted(rtts)[len(rtts) // 2], 1) if rtts else None}
+            report["steps"].append(step)
+            say(f"  {step['interval_ms']:>4} ms between commands: "
+                f"{ok} ok, {busy} rejected, rtt {step['rtt_ms']} ms")
+            if busy:
+                report["busy_at_ms"] = step["interval_ms"]
+                break
+            accepted.append(interval)
+    finally:
+        # the burst just filled the radio's queue, so wait at least as long as the
+        # fastest interval we were willing to accept before putting the light back
+        gap = max(0.25, (accepted[-1] * 1.2) if accepted else 0.5)
+        for attempt in range(3):
+            time.sleep(gap)
+            if restore_light(restore, attempts=2):
+                report["restored"] = True
+                break
+
+    if not accepted:
+        report["error"] = ("even the slowest probe was rejected - the radio is busy or "
+                           "the coordinator is down")
+        return report
+
+    floor = accepted[-1] * 1.15                       # a margin, not the cliff edge
+    ceiling = min(max(floor * 4.0, 0.30), 2.0)
+    floor = round(max(POST_INTERVAL_FLOOR_MIN, min(floor, POST_INTERVAL_CEILING_MAX)), 3)
+    ceiling = round(max(ceiling, floor), 3)
+    report.update({"floor": floor, "ceiling": ceiling,
+                   "best_ms": round(floor * 1000)})
+
+    applied, errors = apply_settings({"POST_INTERVAL_FLOOR": floor,
+                                      "POST_INTERVAL_CEILING": ceiling}, persist=False)
+    report["applied"] = applied
+    if errors:
+        report["error"] = "; ".join(errors)
+        return report
+    report["ok"] = True
+    say(f"  -> {floor:.2f}-{ceiling:.2f} s between commands "
+        f"(busy at {report['busy_at_ms']} ms)" if report["busy_at_ms"]
+        else f"  -> {floor:.2f}-{ceiling:.2f} s between commands (no rejection seen)")
+    return report
 
 
 def calibrate(verbose: bool = True) -> dict:
@@ -3042,9 +3285,11 @@ def get_config():
         "unsaved": bool(PERSISTED) and PERSISTED != settings_snapshot(),
         "secrets_path": str(SECRETS_PATH),
         "secrets_exist": SECRETS_PATH.exists(),
-        # values the saved file is overriding, so the UI can say so out loud
+        # Values the *saved file* is overriding - not live edits like an auto tune,
+        # which is why this compares against what is on disk and only when it exists.
         "env_shadowed": sorted(name for name, value in ENV_SNAPSHOT.items()
-                               if settings_snapshot().get(name) != value),
+                               if CONFIG_PATH.exists()
+                               and str((PERSISTED or {}).get(name)) != str(value)),
     }
 
 
@@ -3139,6 +3384,33 @@ def post_config(payload: Any = Body(...)):
             "persisted": persist, "connection": probe, "autostart": dict(AUTOSTART_RESULT),
             "restart_required": sorted(n for n in changed
                                         if SETTINGS_BY_NAME.get(n, {}).get("restart"))}
+
+
+@app.post("/api/autotune")
+def post_autotune():
+    """Measure the fastest pacing the radio accepts (flashes the first light)."""
+    if DRY_RUN:
+        return JSONResponse({"ok": False, "error": "dry run is on - nothing to measure"},
+                            status_code=400)
+    if not HA_TOKEN:
+        return JSONResponse({"ok": False, "error": "HA_TOKEN is not set"}, status_code=400)
+    if not AUTOTUNE_LOCK.acquire(blocking=False):
+        return JSONResponse({"ok": False, "error": "an auto tune is already running"},
+                            status_code=409)
+    stats["autotuning"] = True
+    stats["autotune"] = None
+
+    def run() -> None:
+        try:
+            stats["autotune"] = autotune(verbose=False)
+        except Exception as exc:                      # keep the flag usable
+            stats["autotune"] = {"ok": False, "error": str(exc)}
+        finally:
+            stats["autotuning"] = False
+            AUTOTUNE_LOCK.release()
+
+    threading.Thread(target=run, name="autotune", daemon=True).start()
+    return {"ok": True, "started": True}
 
 
 @app.post("/api/calibrate")
@@ -3266,6 +3538,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
     parser.add_argument("--version", action="version",
                         version=f"hass_ambilights {__version__}")
+    parser.add_argument("--autotune", action="store_true",
+                        help="stress the lights and pick the fastest pacing they accept")
     parser.add_argument("--calibrate", action="store_true",
                         help="measure this light's colour accuracy, then restore its state")
     parser.add_argument("--no-browser", action="store_true",
@@ -3278,6 +3552,13 @@ def main() -> None:
     parser.add_argument("--server", action="store_true",
                         help="serve only, no window or tray (services, CI)")
     args = parser.parse_args()
+    if args.autotune:
+        load_config_file()
+        TARGETS.extend(parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else ""))
+        report = autotune()
+        if report["error"]:
+            print("auto tune failed: " + report["error"], file=sys.stderr)
+        raise SystemExit(0 if report["ok"] else 1)
     if args.calibrate:
         load_config_file()
         TARGETS.extend(parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else ""))

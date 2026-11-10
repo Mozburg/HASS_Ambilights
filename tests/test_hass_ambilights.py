@@ -720,6 +720,80 @@ if _changelog.exists():
         assert _ver in readme.read_text(), "README does not mention the current version"
 print(f"versioning ok: {_ver} exposed in /health, /api/config, UI and CHANGELOG")
 
+# --- auto tune: find the fastest pacing the radio accepts -------------------
+class _Resp:
+    def __init__(self, ok, text):
+        self.ok, self.text, self.status_code = ok, text, 200 if ok else 500
+
+
+_busy_below = 0.18                  # the "radio" starts rejecting faster than this
+_last_post = [0.0]
+_posts = []
+
+
+def _fake_post(body, timeout=None):
+    now = time.perf_counter()
+    gap = now - _last_post[0]
+    _last_post[0] = now
+    _posts.append((gap, body))
+    if gap < _busy_below:
+        return _Resp(False, '{"message": "Failed to enqueue message"}')
+    return _Resp(True, "[]")
+
+
+_keep_env = (m.DRY_RUN, m.HA_TOKEN, m.check_ha, m._post, m.restore_light, m.session)
+_restored = []
+m.DRY_RUN = False
+m.HA_TOKEN = "tune-token"
+m.check_ha = lambda: True
+m._post = _fake_post
+m.restore_light = lambda restore, attempts=3: (_restored.append(restore), True)[1]
+
+
+class _State:
+    def json(self):
+        return {"attributes": {"rgb_color": [10, 20, 30], "brightness": 99}}
+
+
+m.session = type("S", (), {"get": staticmethod(lambda *a, **k: _State())})()
+m.TARGETS = [m.Target("light.left_lamp", frozenset({1, 4, 7}))]
+_report = m.autotune(verbose=False, per_step=3)
+assert _report["ok"], _report
+assert _report["floor"] * 1000 >= _busy_below * 1000 * 0.9, _report
+assert _report["ceiling"] > _report["floor"], _report
+assert _report["busy_at_ms"] is not None, "should have found the cliff"
+assert _report["restored"] and _restored, "the light must be put back"
+assert "POST_INTERVAL_FLOOR" in _report["applied"], _report["applied"]
+# a dry run has nothing to measure and must say so rather than pretend
+m.DRY_RUN = True
+assert m.autotune(verbose=False, per_step=1)["ok"] is False
+(m.DRY_RUN, m.HA_TOKEN, m.check_ha, m._post, m.restore_light, m.session) = _keep_env
+m.DOMINANT_MIX = m.DOMINANT_MIX          # no-op, keeps the phase boundary obvious
+print(f"autotune ok: picked {_report['floor']:.2f}-{_report['ceiling']:.2f} s "
+      f"(rejected at {_report['busy_at_ms']} ms), light restored")
+
+# --- restore must accept the mode it actually asked for --------------------
+class _Attrs:
+    def __init__(self, mode):
+        self.mode = mode
+
+    def json(self):
+        return {"attributes": {"color_mode": self.mode}}
+
+
+_keep_session, _keep_post = m.session, m._post
+for mode, payload, want in (("rgb", {"rgb_color": [1, 2, 3]}, True),
+                            ("xy", {"xy_color": [0.3, 0.3]}, True),
+                            ("color_temp", {"color_temp_kelvin": 2000}, True),
+                            ("rgb", {"xy_color": [0.3, 0.3]}, False)):
+    m.session = type("S", (), {"get": staticmethod(lambda *a, _m=mode, **k: _Attrs(_m))})()
+    m._post = lambda *a, **k: None
+    target = {"entity_id": "light.a", **payload}
+    got = m.restore_light(target, attempts=1)
+    assert got is want, (mode, payload, got)
+m.session, m._post = _keep_session, _keep_post
+print("restore ok: rgb/xy/colour-temp read-backs all match")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False

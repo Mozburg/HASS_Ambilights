@@ -113,6 +113,9 @@ covered by the zones in use is captured at all.
 |---|---|
 | `COLOR_ALGO` | `mean` = linear average of the zones; `dominant` = the most prominent *coloured* cluster, neutral cells ignored (default) |
 | `DOMINANT_MIX` | 0–1 slider between those two models, blended in u'v' (default 0.5) |
+| `DOMINANT_LUMINANCE` | brightness follows the winning cluster (`cluster`, default) or the whole region (`region`) |
+| `CHROMA_FLOOR` | how colourful a cell must be to vote at all — this is what makes white pages and grey UI stop washing the colour out (default du'v' 0.010) |
+| `HUE_BINS` | dominant mode's hue resolution: 24 = 15° buckets, and the winner is averaged with its two neighbours. Lower merges two similar hues into one steady colour; higher separates them but can flicker between neighbours (default 24) |
 | `DOMINANT_LUMINANCE` | `cluster` = the dominant object's own brightness, `region` = the zone's mean |
 | `SATURATION_BOOST` | off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
 | `BRIGHTNESS_FROM` | `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |

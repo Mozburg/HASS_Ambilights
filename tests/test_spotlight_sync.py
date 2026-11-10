@@ -632,6 +632,14 @@ m.HA_TOKEN = _orig_token
 m.LIGHTS_CACHE.update({"at": 0.0, "data": None})
 print("picker ok: light.* only, colour-capable first, cached, refreshable")
 
+# --- help text has to say what a knob does, not just name it --------------
+_meta = {m_entry["name"]: m_entry for m_entry in m.get_config()["meta"]}
+_bins_help = _meta["HUE_BINS"]["help"]
+assert "15°" in _bins_help and "flicker" in _bins_help, _bins_help
+assert len(_bins_help) > 80, "help text too terse to be useful"
+assert _meta["HUE_BINS"]["min"] == 6 and _meta["HUE_BINS"]["max"] == 72
+print("help text ok: hue bins explains its effect and its range")
+
 # --- unchanged settings are not reported as needing a restart -------------
 _orig_port = m.BIND_PORT
 _now = m.settings_snapshot()

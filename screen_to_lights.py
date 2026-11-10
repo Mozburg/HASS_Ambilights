@@ -1132,7 +1132,10 @@ SETTINGS = [
           "du'v' below this counts as neutral when picking the dominant colour.",
           min=0.001, max=0.05, step=0.001),
     _spec("HUE_BINS", "int", 24, "Colour", "Hue bins",
-          "Resolution of the dominant-hue histogram.", min=6, max=72),
+          "Dominant mode's hue resolution (24 = 15° buckets, averaged with their "
+          "neighbours). Lower merges similar hues; higher separates them but can "
+          "flicker.",
+          min=6, max=72),
     _spec("SATURATION_BOOST", "bool", False, "Colour", "Saturation boost",
           "Push chroma away from white as the frame gets brighter. Off sends the "
           "measured colour untouched."),

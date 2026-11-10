@@ -324,6 +324,31 @@ DRY_RUN = _env("DRY_RUN", "0") == "1"   # log payloads, never touch the lights
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def redirect_std_streams() -> None:
+    """A --windowed exe has sys.stdout/stderr set to None.
+
+    Everything that writes to them (print, uvicorn's default log config, a
+    traceback) then fails or goes nowhere, which is how a packaged app ends up
+    "starting" and never serving with no usable log.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    path = log_file_path()
+    stream = None
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stream = open(path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            stream = None
+    if stream is None:
+        stream = open(os.devnull, "a", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def setup_file_logging() -> None:
     """Packaged apps have no console: keep a rotating log we can ask for."""
     path = log_file_path()
@@ -3269,8 +3294,10 @@ def main() -> None:
     else:
         mode = "server"
 
+    redirect_std_streams()
     setup_file_logging()
     make_dpi_aware()                     # before any window or capture exists
+    log.info("Hass Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
 
     ENV_SNAPSHOT.update(settings_snapshot())
     load_secrets()
@@ -3318,9 +3345,11 @@ def main() -> None:
             import webbrowser
 
             threading.Timer(1.0, webbrowser.open, (url,)).start()
-        uvicorn.run(app, host=BIND_HOST, port=port)
+        log.info("serving on http://%s:%s", BIND_HOST, port)
+        uvicorn.run(app, host=BIND_HOST, port=port, log_config=None)
         return
 
+    log.info("starting the embedded server on %s", url)
     thread, server = start_server(BIND_HOST, port)
     if not wait_for_server(url):
         server.should_exit = True

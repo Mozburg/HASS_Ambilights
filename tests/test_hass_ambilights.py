@@ -751,6 +751,22 @@ try:
     assert m.find_instance("127.0.0.1", _busy, limit=1) is None, "claimed a foreign port"
 finally:
     _srv.close()
+# a --windowed exe has no stdout/stderr; redirect_std_streams must cope and
+# send later writes to the log rather than raising on None
+import subprocess as _subprocess
+_log_path = Path(tempfile.mkdtemp()) / "windowed.log"
+_child = _subprocess.run(
+    [sys.executable, "-c",
+     "import sys; sys.path.insert(0, %r); import hass_ambilights as m; "
+     "sys.stdout = None; sys.stderr = None; m.redirect_std_streams(); "
+     "assert sys.stdout is not None and sys.stderr is not None; "
+     "print('written after redirect')" % str(Path(m.__file__).resolve().parent)],
+    capture_output=True, text=True, timeout=60,
+    env={**__import__("os").environ, "LOG_FILE": str(_log_path)})
+assert _child.returncode == 0, _child.stderr[-400:]
+assert _log_path.exists() and "written after redirect" in _log_path.read_text(), \
+    "a windowed run must write where it can be read"
+
 # a closed port must be retried, not raised, and a dead one must time out
 assert m.wait_for_server("http://127.0.0.1:9/", timeout=0.6) is False
 assert m.port_is_ours("127.0.0.1", 9, timeout=0.4) is False

@@ -702,6 +702,59 @@ assert m.cells_for(_col, _grid, _cells).shape[0] == 22 * 36
 m.aggregate(_stitched)                                     # must not raise
 print("ragged zones ok: 22/21 column blocks stitch into one cell list")
 
+# --- bad TRANSITION must not reach the sender ------------------------------
+for bad in ("", "   ", "abc"):
+    assert m.apply_settings({"TRANSITION": bad})[1], f"TRANSITION {bad!r} should be rejected"
+assert m.apply_settings({"TRANSITION": "auto"})[0]["TRANSITION"] == "auto"
+assert m.apply_settings({"TRANSITION": " auto "})[0]["TRANSITION"] == "auto", "trim it"
+assert m.apply_settings({"TRANSITION": "0.4"})[0]["TRANSITION"] == "0.4"
+assert m.apply_settings({"TRANSITION": "9"})[1], "9 s is out of range"
+_keep_tr = m.TRANSITION
+m.TRANSITION = ""                       # as if a hand-edited file had got it in
+assert isinstance(m.current_transition(), float), "a bad TRANSITION must not raise"
+m.TRANSITION = "1.5"
+assert abs(m.current_transition() - 1.5) < 1e-6
+m.TRANSITION = _keep_tr
+print("transition ok: validated, and a bad value cannot kill the sender")
+
+# --- boosted chromaticity must stay inside the CIE xy domain --------------
+_blue = {"rgb": [60, 80, 255], "xy": [0.1815, 0.1157], "luminance": 0.35}
+_keep_boost = (m.SATURATION_BOOST, m.SATURATION_GAIN, m.SATURATION_CURVE, m.SATURATION_MAX)
+m.SATURATION_BOOST, m.SATURATION_GAIN, m.SATURATION_CURVE, m.SATURATION_MAX = True, 2.0, 0.2, 4.0
+_pv = m.preview_colour(_blue)
+assert m.valid_xy(_pv["xy"]), _pv
+assert max(_pv["rgb"]) > 0, "a blue screen must not preview as black"
+_pl = m.build_payload(_blue)
+assert m.valid_xy(_pl.get("xy_color", _pv["xy"])), _pl
+_keep_mode = m.SEND_MODE
+m.SEND_MODE = "rgb"
+assert max(m.build_payload(_blue)["rgb_color"]) > 0, "rgb mode must not send 0,0,0"
+m.SEND_MODE = _keep_mode
+(m.SATURATION_BOOST, m.SATURATION_GAIN, m.SATURATION_CURVE,
+ m.SATURATION_MAX) = _keep_boost
+assert m.valid_xy((0.3, 0.3)) and not m.valid_xy((0.09, -0.02))
+assert not m.valid_xy((0.7, 0.5))       # x + y > 1 is outside the domain
+print("xy domain ok: boost stays valid, rgb never collapses to black")
+
+# --- install-path helpers --------------------------------------------------
+assert m._deps_import(sys.executable) is True
+assert m._deps_import("/nonexistent/python") is False
+for good in ("127.0.0.1", "0.0.0.0", "::", "localhost", "homeassistant.local", "192.168.1.10"):
+    assert m.valid_bind_host(good), good
+for bad in ("999.999.999.999", "http://0.0.0.0:8000", "", "a b", "0.0.0.0/ui"):
+    assert not m.valid_bind_host(bad), bad
+print("install helpers ok: dependency probe, bind address validation")
+
+# --- one bad key in config.json must not discard the good ones ------------
+_cfg_path = __import__("pathlib").Path(tempfile.mkdtemp()) / "config.json"
+_cfg_path.write_text(_json.dumps({"CAPTURE_FPS": 7.5, "ligths": 3, "COLOR_ALGO": "mean"}))
+_keep_loaded = m.CONFIG_LOADED
+m.CONFIG_LOADED = False
+m.load_config_file(_cfg_path)
+assert m.CAPTURE_FPS == 7.5 and m.COLOR_ALGO == "mean", (m.CAPTURE_FPS, m.COLOR_ALGO)
+m.CONFIG_LOADED = _keep_loaded
+print("partial config load ok: unknown keys warned, valid settings applied")
+
 # --- SEND_BRIGHTNESS off: the payload carries no brightness ----------------
 _c = {"rgb": [10, 200, 60], "xy": [0.31, 0.33], "luminance": 0.4}
 _t = m.Target("light.a", frozenset({2}))

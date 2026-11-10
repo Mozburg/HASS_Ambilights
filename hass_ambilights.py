@@ -187,7 +187,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1080,15 +1080,7 @@ async function reload() {
     return;
   }
   LASTCONFIG = data;
-  if (data.env_shadowed && data.env_shadowed.length) {
-    $("loaderror").innerHTML =
-      `<div class="banner" style="border-color:rgba(210,153,34,.55);background:rgba(210,153,34,.08);
-        color:#e3b341">${esc(data.config_path)} is overriding ${data.env_shadowed.length}
-        environment setting(s): ${esc(data.env_shadowed.join(", "))}.
-        Delete that file or press <em>Reset to defaults</em> to let the environment win.</div>`;
-  } else {
-    $("loaderror").innerHTML = "";
-  }
+  $("loaderror").innerHTML = "";
   META = data.meta;
   CFG = data.settings;
   SAVED = data.saved_settings || {};
@@ -1478,7 +1470,7 @@ reload()
 </html>
 """
 GEOMETRY_REV = 0            # bumped when the light/zone map changes at runtime
-ENV_SNAPSHOT: dict = {}     # settings as the environment left them, before config.json
+
 
 
 def _spec(name, kind, default, group, label, help_text="", **kw):
@@ -3117,7 +3109,6 @@ def first_free_port(host: str, first: int, limit: int = 12) -> int:
 async def lifespan(_app: FastAPI):
     global TARGETS
     if not CONFIG_LOADED:
-        ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
         load_secrets()
         load_config_file()
     if not PERSISTED:                          # no config.json yet: revert to boot values
@@ -3285,11 +3276,6 @@ def get_config():
         "unsaved": bool(PERSISTED) and PERSISTED != settings_snapshot(),
         "secrets_path": str(SECRETS_PATH),
         "secrets_exist": SECRETS_PATH.exists(),
-        # Values the *saved file* is overriding - not live edits like an auto tune,
-        # which is why this compares against what is on disk and only when it exists.
-        "env_shadowed": sorted(name for name, value in ENV_SNAPSHOT.items()
-                               if CONFIG_PATH.exists()
-                               and str((PERSISTED or {}).get(name)) != str(value)),
     }
 
 
@@ -3580,7 +3566,6 @@ def main() -> None:
     make_dpi_aware()                     # before any window or capture exists
     log.info("Hass Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
 
-    ENV_SNAPSHOT.update(settings_snapshot())
     load_secrets()
     load_config_file()                   # BIND_* may come from config.json
 

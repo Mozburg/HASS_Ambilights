@@ -485,10 +485,6 @@ UI_HTML = r"""<!DOCTYPE html>
   <div>
     <div id="loaderror"></div>
     <div id="settings"></div>
-    <div class="actions" style="padding:0 0 18px">
-      <button class="btn" id="testconn" type="button">Test connection</button>
-      <span class="mono" id="connstatus" style="font-size:12px"></span>
-    </div>
 
     <div class="card">
       <h2>Lights</h2>
@@ -496,8 +492,11 @@ UI_HTML = r"""<!DOCTYPE html>
         <div id="lights"></div>
         <div class="actions" style="padding:6px 0 0">
           <button class="btn" id="addlight" type="button">+ Add light</button>
-          <small class="mono">Zones are a 3×3 grid in reading order: 1 2 3 / 4 5 6 / 7 8 9.
-            Leave empty to use <code>LIGHT_ENTITY_ID</code> for the whole screen.</small>
+          <button class="btn" id="refreshlights" type="button"
+                  title="Reload the light list from Home Assistant">↻ From Home Assistant</button>
+          <small class="mono" id="lightsource">Zones are a 3×3 grid in reading order:
+            1 2 3 / 4 5 6 / 7 8 9. Leave empty to use <code>LIGHT_ENTITY_ID</code>
+            for the whole screen.</small>
         </div>
       </div>
     </div>
@@ -595,13 +594,37 @@ function renderLights() {
     const row = document.createElement("div");
     row.className = "light";
 
-    const name = document.createElement("input");
-    name.type = "text";
-    name.value = light.entity;
-    name.placeholder = "light.left_lamp";
-    name.id = `light-${i}`;
-    name.setAttribute("aria-label", `Light ${i + 1} entity id`);
-    name.oninput = () => { LIGHTS[i].entity = name.value; setDirty(true); };
+    let name;
+    if (ENTITIES && ENTITIES.ok && ENTITIES.lights.length) {
+      name = document.createElement("select");
+      name.id = `light-${i}`;
+      name.setAttribute("aria-label", `Light ${i + 1} entity`);
+      const options = ENTITIES.lights.slice();
+      if (light.entity && !options.some((l) => l.entity_id === light.entity)) {
+        options.unshift({ entity_id: light.entity, name: `${light.entity} (not reported by HA)`,
+                          color_capable: true });
+      }
+      const blank = document.createElement("option");
+      blank.value = ""; blank.textContent = "— pick a light —";
+      name.appendChild(blank);
+      options.forEach((l) => {
+        const o = document.createElement("option");
+        o.value = l.entity_id;
+        o.textContent = `${l.name} — ${l.entity_id}` + (l.color_capable ? "" : " (no colour)");
+        if (l.entity_id === light.entity) o.selected = true;
+        name.appendChild(o);
+      });
+      if (!light.entity) name.value = "";
+      name.onchange = () => { LIGHTS[i].entity = name.value; setDirty(true); markUsedZones(); };
+    } else {
+      name = document.createElement("input");
+      name.type = "text";
+      name.value = light.entity;
+      name.placeholder = "light.left_lamp";
+      name.id = `light-${i}`;
+      name.setAttribute("aria-label", `Light ${i + 1} entity id`);
+      name.oninput = () => { LIGHTS[i].entity = name.value; setDirty(true); };
+    }
 
     const zones = document.createElement("div");
     zones.className = "zones";
@@ -776,12 +799,47 @@ function renderSettings() {
       row.append(left, control(m, CFG[m.name]));
       body.appendChild(row);
     });
+    if (group === "Home Assistant") {
+      // test the URL/token where they are edited, not in a separate strip
+      const conn = document.createElement("div");
+      conn.className = "actions";
+      conn.style.padding = "10px 0 0";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "btn"; btn.id = "testconn";
+      btn.textContent = "Test connection";
+      const status = document.createElement("span");
+      status.className = "mono"; status.id = "connstatus";
+      status.style.fontSize = "12px";
+      btn.onclick = testConnection;
+      conn.append(btn, status);
+      body.appendChild(conn);
+    }
     card.appendChild(body);
     host.appendChild(card);
   });
 }
 
 /* ------------------------------------------------------------------ data -- */
+let ENTITIES = null;
+
+async function loadEntities(force) {
+  const note = $("lightsource");
+  try {
+    const r = await fetch("/api/lights" + (force ? "?refresh=1" : ""));
+    ENTITIES = await r.json();
+  } catch (e) {
+    ENTITIES = { ok: false, lights: [], detail: e.message };
+  }
+  if (note) {
+    if (ENTITIES.ok) {
+      note.textContent = `${ENTITIES.count} light(s) from Home Assistant — pick one per row.`;
+    } else {
+      note.textContent = `Typing entity ids by hand: ${ENTITIES.detail}.`;
+    }
+  }
+  return ENTITIES;
+}
+
 async function reload() {
   let data;
   try {
@@ -807,6 +865,7 @@ async function reload() {
   META = data.meta;
   CFG = data.settings;
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
+  if (ENTITIES === null) await loadEntities(false);   // first paint only
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
@@ -999,7 +1058,13 @@ $("revert").addEventListener("click", reload);
 $("reset").addEventListener("click", resetDefaults);
 $("calibrate").addEventListener("click", calibrate);
 $("addlight").addEventListener("click", addLight);
-$("testconn").addEventListener("click", async () => {
+$("refreshlights").addEventListener("click", async () => {
+  await loadEntities(true);
+  renderLights();
+  toast((ENTITIES.ok ? `${ENTITIES.count} light(s) loaded` : "Could not load lights: " + ENTITIES.detail),
+        !ENTITIES.ok);
+});
+async function testConnection() {
   const body = { HA_URL: CFG.HA_URL };
   const typed = (CFG.HA_TOKEN && CFG.HA_TOKEN !== "<set>" && CFG.HA_TOKEN !== "--clear--")
     ? CFG.HA_TOKEN : "";
@@ -1015,7 +1080,8 @@ $("testconn").addEventListener("click", async () => {
     $("connstatus").textContent = "✖ " + e.message;
     $("connstatus").style.color = "var(--bad)";
   }
-});
+}
+$("testconn").addEventListener("click", testConnection);
 window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
@@ -2289,6 +2355,55 @@ def index_page():
     return HTMLResponse(UI_HTML, headers={"Cache-Control": "no-store"})
 
 
+LIGHTS_CACHE = {"at": 0.0, "data": None}
+LIGHTS_CACHE_TTL = 30.0
+
+
+@app.get("/api/lights")
+def get_lights(refresh: bool = False):
+    """Light entities from Home Assistant, for the picker."""
+    now = time.time()
+    cached = LIGHTS_CACHE["data"]
+    if not refresh and cached is not None and now - LIGHTS_CACHE["at"] < LIGHTS_CACHE_TTL:
+        return cached
+    if not HA_TOKEN:
+        return {"ok": False, "lights": [],
+                "detail": "no token yet - fill in the Home Assistant card above and save"}
+    try:
+        response = session.get(f"{HA_URL}/api/states", headers=auth_headers(),
+                               timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        return {"ok": False, "lights": [], "detail": str(exc)}
+    if response.status_code != 200:
+        detail = ("token rejected (401)" if response.status_code == 401
+                  else f"HTTP {response.status_code}")
+        return {"ok": False, "lights": [], "detail": detail}
+    try:
+        states = response.json()
+    except ValueError:
+        return {"ok": False, "lights": [], "detail": "Home Assistant returned non-JSON"}
+
+    found = []
+    for state in states if isinstance(states, list) else []:
+        entity = str(state.get("entity_id") or "")
+        if not entity.startswith("light."):
+            continue
+        attrs = state.get("attributes") or {}
+        modes = [str(m) for m in (attrs.get("supported_color_modes") or [])]
+        found.append({
+            "entity_id": entity,
+            "name": str(attrs.get("friendly_name") or entity.split(".", 1)[-1].replace("_", " ")),
+            "state": state.get("state"),
+            "color_modes": modes,
+            # only these modes can express an arbitrary hue
+            "color_capable": any(m in ("xy", "rgb", "rgbw", "rgbww", "hs", "rgbxy") for m in modes),
+        })
+    found.sort(key=lambda l: (not l["color_capable"], l["name"].lower()))
+    payload = {"ok": True, "count": len(found), "lights": found}
+    LIGHTS_CACHE.update({"at": now, "data": payload})
+    return payload
+
+
 @app.get("/api/config")
 def get_config():
     return {
@@ -2333,14 +2448,21 @@ def post_test_connection(payload: dict = Body(default={})):
 @app.post("/api/config")
 def post_config(payload: dict = Body(...)):
     """Save settings. Validated as a whole: nothing is applied on any error."""
+    before = settings_snapshot()
     if payload.get("reset"):
         applied, errors = apply_settings({s["name"]: s["default"] for s in SETTINGS})
     else:
         applied, errors = apply_settings(payload.get("settings", payload))
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
+    # the UI posts every setting, so report what actually changed rather than
+    # telling the user to restart for knobs they never touched
+    after = settings_snapshot()
+    changed_names = [name for name in applied if str(before.get(name)) != str(after.get(name))]
+    applied = {name: applied[name] for name in changed_names}
+    changed = {name for name in applied if str(before.get(name)) != str(after.get(name))}
     probe = {"ok": True, "detail": "unchanged"}
-    if {"HA_URL", "HA_TOKEN"} & set(applied):
+    if {"HA_URL", "HA_TOKEN"} & changed:
         probe = post_test_connection({})
     # never hand a secret back, even the one that was just supplied
     safe_applied = {
@@ -2350,8 +2472,8 @@ def post_config(payload: dict = Body(...)):
     }
     return {"ok": True, "applied": safe_applied, "settings": settings_snapshot(),
             "connection": probe,
-            "restart_required": [n for n in applied
-                                 if SETTINGS_BY_NAME.get(n, {}).get("restart")]}
+            "restart_required": sorted(n for n in changed
+                                        if SETTINGS_BY_NAME.get(n, {}).get("restart"))}
 
 
 @app.post("/api/calibrate")

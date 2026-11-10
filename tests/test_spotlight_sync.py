@@ -18,6 +18,8 @@ RTT_S = 0.0
 BUSY_LEFT = 0
 FAIL_POSTS = 0
 CONTROLLER_DOWN = 0
+GET_COUNT = 0
+GET_AUTH = []
 
 
 class MockHA(BaseHTTPRequestHandler):
@@ -25,9 +27,26 @@ class MockHA(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        global GET_COUNT
+        GET_COUNT += 1
+        GET_AUTH.append(self.headers.get("Authorization"))
+        body = b"{}"
+        if self.path.startswith("/api/states"):
+            body = json.dumps([
+                {"entity_id": "light.plain_bulb", "state": "off",
+                 "attributes": {"friendly_name": "Plain Bulb",
+                                "supported_color_modes": ["color_temp"]}},
+                {"entity_id": "light.desk_lamp", "state": "on",
+                 "attributes": {"friendly_name": "Desk Lamp",
+                                "supported_color_modes": ["xy", "color_temp"]}},
+                {"entity_id": "switch.not_a_light", "state": "on", "attributes": {}},
+                {"entity_id": "light.attic", "state": "on", "attributes": {}},
+            ]).encode()
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(body)
 
     def do_POST(self):
         global BUSY_LEFT, FAIL_POSTS
@@ -587,12 +606,51 @@ m.BIND_HOST, m.BIND_PORT = _orig_bind
 m.BIND_HOST, m.BIND_PORT = _orig_bind
 print("bind ok: loopback default, URL rejected, port clamped, restart-tagged")
 
+# --- light picker: entities come from Home Assistant ----------------------
+_orig_token = m.HA_TOKEN
+m.HA_TOKEN = "picker-token"
+m.LIGHTS_CACHE.update({"at": 0.0, "data": None})
+_picker = m.get_lights()
+assert _picker["ok"] and _picker["count"] == 3, _picker          # switch.* excluded
+_ids = [l["entity_id"] for l in _picker["lights"]]
+assert _ids[0] == "light.desk_lamp", _ids                        # colour-capable first
+assert set(_ids) == {"light.desk_lamp", "light.plain_bulb", "light.attic"}
+assert _picker["lights"][0]["color_capable"] is True
+assert _picker["lights"][1]["color_capable"] is False
+assert _picker["lights"][1]["name"] == "attic", "missing friendly_name falls back to the id"
+assert any(a == "Bearer picker-token" for a in GET_AUTH), "state fetch must send the token"
+
+_count = GET_COUNT
+assert m.get_lights()["count"] == 3 and GET_COUNT == _count, "second call must be cached"
+m.get_lights(refresh=True)
+assert GET_COUNT == _count + 1, "refresh must bypass the cache"
+
+m.HA_TOKEN = ""
+_no_token = m.get_lights(refresh=True)
+assert _no_token["ok"] is False and "token" in _no_token["detail"].lower()
+m.HA_TOKEN = _orig_token
+m.LIGHTS_CACHE.update({"at": 0.0, "data": None})
+print("picker ok: light.* only, colour-capable first, cached, refreshable")
+
+# --- unchanged settings are not reported as needing a restart -------------
+_orig_port = m.BIND_PORT
+_now = m.settings_snapshot()
+_first = m.post_config({"settings": {"BIND_PORT": _now["BIND_PORT"],
+                                    "COLOR_ALGO": _now["COLOR_ALGO"]}})
+assert _first["restart_required"] == [], _first["restart_required"]
+assert _first["applied"] == {}, _first["applied"]
+_second = m.post_config({"settings": {"BIND_PORT": 8123}})
+assert _second["restart_required"] == ["BIND_PORT"], _second["restart_required"]
+assert list(_second["applied"]) == ["BIND_PORT"], _second["applied"]
+m.BIND_PORT = _orig_port
+print("change reporting ok: only touched knobs are listed")
+
 # --- the single file is a complete install --------------------------------
 _ui = m.index_page()
 assert getattr(_ui, "status_code", 200) == 200, "GET / must serve the embedded page"
 _page = _ui.body.decode()
-for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="testconn"',
-               'id="settings"', "Screen → Lights"):
+for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="refreshlights"',
+               'id="lights"', "Screen → Lights", "Test connection"):
     assert needle in _page, needle
 assert "/static/" not in _page, "page must not depend on external assets"
 assert len(m.UI_HTML) > 20000

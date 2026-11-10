@@ -655,6 +655,16 @@ for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="refreshl
 assert "/static/" not in _page, "page must not depend on external assets"
 assert len(m.UI_HTML) > 20000
 
+# a top-level binding to a missing id throws before the first render and leaves a
+# blank page, so every id bound at load time must exist in the markup
+import re as _re
+_bound = _re.findall(r'^on\("([A-Za-z0-9_-]+)"', _page, _re.M)
+assert _bound, "expected top-level bindings"
+_missing = [i for i in _bound if f'id="{i}"' not in _page]
+assert not _missing, f"bound at load but not in the page: {_missing}"
+assert not _re.search(r'^\$\("[A-Za-z0-9_-]+"\)\.addEventListener', _page, _re.M), \
+    "bind through on() so a missing element cannot blank the page"
+
 # the bootstrap list and requirements.txt must not drift apart
 _req = __import__("pathlib").Path(m.__file__).with_name("requirements.txt")
 if _req.exists():

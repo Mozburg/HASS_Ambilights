@@ -1053,12 +1053,20 @@ async function tick() {
 }
 
 /* ----------------------------------------------------------------- wiring -- */
-$("save").addEventListener("click", save);
-$("revert").addEventListener("click", reload);
-$("reset").addEventListener("click", resetDefaults);
-$("calibrate").addEventListener("click", calibrate);
-$("addlight").addEventListener("click", addLight);
-$("refreshlights").addEventListener("click", async () => {
+// Bind defensively: a missing element used to throw here and kill the whole
+// script before the first render, leaving a blank page instead of a hint.
+function on(id, event, handler) {
+  const el = $(id);
+  if (el) el.addEventListener(event, handler);
+  else console.error(`UI element #${id} is missing - not binding ${event}`);
+  return el;
+}
+on("save", "click", save);
+on("revert", "click", reload);
+on("reset", "click", resetDefaults);
+on("calibrate", "click", calibrate);
+on("addlight", "click", addLight);
+on("refreshlights", "click", async () => {
   await loadEntities(true);
   renderLights();
   toast((ENTITIES.ok ? `${ENTITIES.count} light(s) loaded` : "Could not load lights: " + ENTITIES.detail),
@@ -1081,11 +1089,17 @@ async function testConnection() {
     $("connstatus").style.color = "var(--bad)";
   }
 }
-$("testconn").addEventListener("click", testConnection);
 window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
-reload().then(() => { tick(); setInterval(tick, 1000); });
+reload()
+  .then(() => { tick(); setInterval(tick, 1000); })
+  .catch((e) => {
+    $("loaderror").innerHTML =
+      `<div class="banner">The settings page failed to start (${esc(e.message)}).`
+      + " Reload the page; if it stays empty, check the server log.</div>";
+    console.error(e);
+  });
 </script>
 </body>
 </html>

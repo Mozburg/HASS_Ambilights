@@ -115,6 +115,10 @@
   <div>
     <div id="loaderror"></div>
     <div id="settings"></div>
+    <div class="actions" style="padding:0 0 18px">
+      <button class="btn" id="testconn" type="button">Test connection</button>
+      <span class="mono" id="connstatus" style="font-size:12px"></span>
+    </div>
 
     <div class="card">
       <h2>Lights</h2>
@@ -333,6 +337,29 @@ function control(meta, value) {
     wrap.append(range, num);
     return wrap;
   }
+  if (meta.type === "secret") {
+    const secret = document.createElement("input");
+    const isSet = value === "<set>";
+    secret.type = "password";
+    secret.id = id;
+    secret.autocomplete = "new-password";
+    secret.value = "";
+    secret.placeholder = isSet ? "●●●● saved — type to replace" : "paste a long-lived token";
+    secret.oninput = () => { CFG[meta.name] = secret.value; setDirty(true); };
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "btn";
+    clear.textContent = "Clear";
+    clear.disabled = !isSet;
+    clear.title = "Remove the saved token";
+    clear.onclick = () => {
+      CFG[meta.name] = "--clear--";
+      secret.value = ""; secret.placeholder = "cleared on save"; clear.disabled = true;
+      setDirty(true);
+    };
+    wrap.append(secret, clear);
+    return wrap;
+  }
   const text = document.createElement("input");
   text.type = "text"; text.value = value ?? ""; text.id = id;
   text.oninput = () => { CFG[meta.name] = text.value; setDirty(true); };
@@ -419,8 +446,13 @@ async function save() {
       $("save").disabled = false;
       return;
     }
-    toast("Saved & applied" + (data.restart_required.length
-      ? " — restart to apply " + data.restart_required.join(", ") : ""));
+    let msg = "Saved & applied";
+    if (data.restart_required.length) msg += " — restart to apply " + data.restart_required.join(", ");
+    if (data.connection && data.connection.detail !== "unchanged") {
+      msg += " · HA: " + data.connection.detail;
+      if (!data.connection.ok) { toast(msg, true); await reload(); return; }
+    }
+    toast(msg);
     await reload();
   } catch (e) {
     toast("Save failed: " + e.message, true);
@@ -583,6 +615,23 @@ $("revert").addEventListener("click", reload);
 $("reset").addEventListener("click", resetDefaults);
 $("calibrate").addEventListener("click", calibrate);
 $("addlight").addEventListener("click", addLight);
+$("testconn").addEventListener("click", async () => {
+  const body = { HA_URL: CFG.HA_URL };
+  const typed = (CFG.HA_TOKEN && CFG.HA_TOKEN !== "<set>" && CFG.HA_TOKEN !== "--clear--")
+    ? CFG.HA_TOKEN : "";
+  if (typed) body.HA_TOKEN = typed;
+  $("connstatus").textContent = "testing…";
+  try {
+    const r = await fetch("/api/test-connection", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    }).then((x) => x.json());
+    $("connstatus").textContent = (r.ok ? "✔ " : "✖ ") + r.detail;
+    $("connstatus").style.color = r.ok ? "var(--ok)" : "var(--bad)";
+  } catch (e) {
+    $("connstatus").textContent = "✖ " + e.message;
+    $("connstatus").style.color = "var(--bad)";
+  }
+});
 window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });

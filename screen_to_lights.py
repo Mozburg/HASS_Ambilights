@@ -301,6 +301,11 @@ def _spec(name, kind, default, group, label, help_text="", **kw):
 
 
 SETTINGS = [
+    _spec("HA_URL", "string", "http://homeassistant.local:8123", "Home Assistant", "URL",
+          "Base URL of your Home Assistant, e.g. http://homeassistant.local:8123"),
+    _spec("HA_TOKEN", "secret", "", "Home Assistant", "Long-lived token",
+          "Create one in Home Assistant: profile -> Security -> Long-lived access tokens. "
+          "Stored in secrets.json (chmod 600), never sent back to the browser."),
     _spec("COLOR_ALGO", "enum", "dominant", "Colour", "Colour model",
           "mean = linear average of the zones. dominant = the most prominent coloured "
           "cluster, neutral/white cells ignored.", values=["mean", "dominant"]),
@@ -387,6 +392,9 @@ SETTINGS = [
           "entity=zones; entity=zones - zones are 1-9 in reading order, or 'all'."),
 ]
 SETTINGS_BY_NAME = {s["name"]: s for s in SETTINGS}
+SECRETS_PATH = Path(os.getenv("SECRETS_FILE") or CONFIG_PATH.with_name("secrets.json"))
+SECRET_SET = "<set>"
+SECRET_UNSET = "<unset>"
 
 
 def _coerce(spec, value):
@@ -395,6 +403,8 @@ def _coerce(spec, value):
         if value not in spec["values"]:
             raise ValueError("must be one of " + ", ".join(spec["values"]))
         return value
+    if kind == "secret":
+        return "" if value is None else str(value).strip()
     if kind == "bool":
         if isinstance(value, bool):
             return value
@@ -414,7 +424,47 @@ def _coerce(spec, value):
 
 
 def settings_snapshot() -> dict:
-    return {s["name"]: globals().get(s["name"], s["default"]) for s in SETTINGS}
+    """Current settings. Secrets are reported as set/unset, never as values."""
+    out = {}
+    for spec in SETTINGS:
+        value = globals().get(spec["name"], spec["default"])
+        if spec["type"] == "secret":
+            out[spec["name"]] = SECRET_SET if value else SECRET_UNSET
+        else:
+            out[spec["name"]] = value
+    return out
+
+
+def persist_secrets() -> bool:
+    """Write the token to its own 0600 file so config.json stays shareable."""
+    try:
+        if HA_TOKEN:
+            SECRETS_PATH.write_text(json.dumps({"HA_TOKEN": HA_TOKEN}) + "\n")
+            try:
+                os.chmod(SECRETS_PATH, 0o600)
+            except OSError:                     # Windows / mounted fs
+                pass
+        elif SECRETS_PATH.exists():
+            SECRETS_PATH.unlink()
+        return True
+    except OSError as exc:
+        log.warning("could not write %s: %s", SECRETS_PATH, exc)
+        return False
+
+
+def load_secrets() -> None:
+    global HA_TOKEN
+    if not SECRETS_PATH.exists():
+        return
+    try:
+        data = json.loads(SECRETS_PATH.read_text())
+    except (OSError, ValueError) as exc:
+        log.error("ignoring %s: %s", SECRETS_PATH, exc)
+        return
+    token = str(data.get("HA_TOKEN") or "").strip()
+    if token:
+        HA_TOKEN = token
+        log.info("loaded the Home Assistant token from %s", SECRETS_PATH)
 
 
 def persist_config(path: Path | None = None) -> bool:
@@ -452,8 +502,23 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
     if errors:
         return {}, errors
 
+    token_changed = False
+    if "HA_TOKEN" in new:
+        supplied = new["HA_TOKEN"]
+        if supplied in ("", SECRET_SET, SECRET_UNSET):
+            new.pop("HA_TOKEN")                 # blank = leave the saved token alone
+        elif supplied == "--clear--":
+            new["HA_TOKEN"] = ""
+            token_changed = True
+        else:
+            token_changed = True
+    if "HA_URL" in new:
+        new["HA_URL"] = str(new["HA_URL"]).rstrip("/")
+
     for name, value in new.items():
         globals()[name] = value
+    if token_changed:
+        persist_secrets()
     if "LIGHT_MAP" in new:
         TARGETS = parse_light_map(new["LIGHT_MAP"])
         GEOMETRY_REV += 1
@@ -493,9 +558,12 @@ stats = {"posts": 0, "frames": 0, "dropped": 0, "rtt_ms": None, "interval_ms": N
 _last_error_log = 0.0
 
 session = requests.Session()
-session.headers.update(
-    {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
-)
+session.headers.update({"Content-Type": "application/json"})
+
+
+def auth_headers() -> dict:
+    """Built per request: the token can change at runtime from the UI."""
+    return {"Authorization": f"Bearer {HA_TOKEN}"} if HA_TOKEN else {}
 
 
 # ------------------------------------------------------------- colour math --
@@ -834,14 +902,14 @@ def _session_local() -> requests.Session:
     sess = getattr(_local, "session", None)
     if sess is None:
         sess = requests.Session()
-        sess.headers.update({"Authorization": f"Bearer {HA_TOKEN}",
-                             "Content-Type": "application/json"})
+        sess.headers.update({"Content-Type": "application/json"})
         _local.session = sess
     return sess
 
 
 def _post(body: dict, timeout: float | None = None) -> requests.Response:
     return _session_local().post(f"{HA_URL}/api/services/light/turn_on", json=body,
+                                 headers=auth_headers(),
                                  timeout=REQUEST_TIMEOUT if timeout is None else timeout)
 
 
@@ -940,7 +1008,7 @@ def sender_loop() -> None:
             if time.perf_counter() - last_probe > 2.0:
                 last_probe = time.perf_counter()
                 try:
-                    recovered = session.get(f"{HA_URL}/api/", timeout=2).ok
+                    recovered = session.get(f"{HA_URL}/api/", headers=auth_headers(), timeout=2).ok
                 except requests.RequestException:
                     recovered = False
                 if recovered:
@@ -1101,7 +1169,7 @@ def restore_light(restore: dict, attempts: int = 3) -> bool:
         _post(restore)
         time.sleep(0.6)
         try:
-            attrs = session.get(f"{HA_URL}/api/states/{restore['entity_id']}", timeout=5).json().get("attributes", {})
+            attrs = session.get(f"{HA_URL}/api/states/{restore['entity_id']}", headers=auth_headers(), timeout=5).json().get("attributes", {})
         except requests.RequestException:
             continue
         if "xy_color" in restore:
@@ -1118,7 +1186,7 @@ def check_ha() -> bool:
         log.error("HA_TOKEN is empty - create one in HA: profile -> Security -> Long-lived access tokens")
         return False
     try:
-        response = session.get(f"{HA_URL}/api/", timeout=5)
+        response = session.get(f"{HA_URL}/api/", headers=auth_headers(), timeout=5)
     except requests.RequestException as exc:
         log.error("Could not reach Home Assistant at %s: %s", HA_URL, exc)
         return False
@@ -1165,7 +1233,7 @@ def calibrate(verbose: bool = True) -> dict:
         attrs = {}                                  # no HA needed to dry-run
     else:
         try:
-            attrs = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json().get("attributes", {})
+            attrs = session.get(f"{HA_URL}/api/states/{entity}", headers=auth_headers(), timeout=5).json().get("attributes", {})
         except requests.RequestException as exc:
             report["error"] = f"could not read the light's current state: {exc}"
             return report
@@ -1190,7 +1258,7 @@ def calibrate(verbose: bool = True) -> dict:
                 continue
             _post(body)
             time.sleep(0.5)
-            got = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json().get("attributes", {})
+            got = session.get(f"{HA_URL}/api/states/{entity}", headers=auth_headers(), timeout=5).json().get("attributes", {})
             got_xy = got.get("xy_color") or []
             if len(got_xy) != 2:
                 say(f"{target_rgb}: no xy reported (mode={got.get('color_mode')})")
@@ -1398,6 +1466,7 @@ def capture_loop() -> None:
 async def lifespan(_app: FastAPI):
     global TARGETS
     ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
+    load_secrets()
     load_config_file()
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
     check_ha()
@@ -1475,10 +1544,34 @@ def get_config():
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "restart_required": [s["name"] for s in SETTINGS if s.get("restart")],
         "config_exists": CONFIG_PATH.exists(),
+        "ha_url": HA_URL,
+        "ha_token_set": bool(HA_TOKEN),
+        "secrets_path": str(SECRETS_PATH),
+        "secrets_exist": SECRETS_PATH.exists(),
         # values the saved file is overriding, so the UI can say so out loud
         "env_shadowed": sorted(name for name, value in ENV_SNAPSHOT.items()
                                if settings_snapshot().get(name) != value),
     }
+
+
+@app.post("/api/test-connection")
+def post_test_connection(payload: dict = Body(default={})):
+    """Probe Home Assistant with the saved (or just-supplied) URL and token."""
+    global HA_URL, HA_TOKEN
+    url = str(payload.get("HA_URL") or HA_URL).rstrip("/")
+    token = str(payload.get("HA_TOKEN") or "").strip() or HA_TOKEN
+    if not token:
+        return {"ok": False, "detail": "no token set"}
+    try:
+        response = requests.get(f"{url}/api/", headers={"Authorization": f"Bearer {token}"},
+                                timeout=5)
+    except requests.RequestException as exc:
+        return {"ok": False, "detail": str(exc)}
+    if response.status_code == 200:
+        return {"ok": True, "detail": "connected", "ha_url": url}
+    if response.status_code == 401:
+        return {"ok": False, "detail": "token rejected (401)"}
+    return {"ok": False, "detail": f"HTTP {response.status_code}"}
 
 
 @app.post("/api/config")
@@ -1490,7 +1583,17 @@ def post_config(payload: dict = Body(...)):
         applied, errors = apply_settings(payload.get("settings", payload))
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
-    return {"ok": True, "applied": applied, "settings": settings_snapshot(),
+    probe = {"ok": True, "detail": "unchanged"}
+    if {"HA_URL", "HA_TOKEN"} & set(applied):
+        probe = post_test_connection({})
+    # never hand a secret back, even the one that was just supplied
+    safe_applied = {
+        name: (SECRET_SET if value else SECRET_UNSET)
+        if SETTINGS_BY_NAME.get(name, {}).get("type") == "secret" else value
+        for name, value in applied.items()
+    }
+    return {"ok": True, "applied": safe_applied, "settings": settings_snapshot(),
+            "connection": probe,
             "restart_required": [n for n in applied
                                  if SETTINGS_BY_NAME.get(n, {}).get("restart")]}
 

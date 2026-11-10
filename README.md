@@ -32,6 +32,11 @@ pip install -r requirements.txt
 You need a Home Assistant **long-lived access token**: profile → *Security* →
 *Long-lived access tokens*.
 
+You can either put it in the environment (below) or paste it into the **Home Assistant**
+card in the settings UI on first run — the URL and token are saved server-side, so the
+app starts working without touching env vars. **Test connection** probes them before you
+commit to a save.
+
 ```bash
 export HA_URL=http://192.168.1.10:8123
 export HA_TOKEN=eyJ...
@@ -103,6 +108,18 @@ the photo's colour under `dominant`. `DOMINANT_MIX` decides how far you travel, 
 `DOMINANT_LUMINANCE` decides whether the room follows that object's brightness or
 keeps the zone's overall level.
 
+## Credentials and exposure
+
+`HA_URL` and `HA_TOKEN` are ordinary settings: editable in the UI, and the token is the
+only value that never comes back over the wire. It is stored in `secrets.json`
+(`chmod 600`, gitignored) rather than `config.json`, reported to the browser only as
+`<set>`/`<unset>`, and masked out of save responses. Leave the field blank to keep the
+saved token, or press **Clear** to remove it.
+
+Note that the UI itself has no authentication and listens on `0.0.0.0:8000` by default,
+so anyone who can reach the port can change settings (and trigger a calibration flash).
+Run it on localhost, or behind your reverse proxy's auth, on a network you trust.
+
 ## Endpoints
 
 | path | purpose |
@@ -110,6 +127,7 @@ keeps the zone's overall level.
 | `GET /` | settings UI |
 | `GET /api/config` | current settings + metadata + light list |
 | `POST /api/config` | validate, apply live, persist (`{"settings":{...}}`, or `{"reset":true}`) |
+| `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
 | `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
 | `GET /regions` | the nine zone colours for the current frame |

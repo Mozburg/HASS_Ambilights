@@ -1,0 +1,3 @@
+# Desktop window and tray (optional - the server runs without them)
+pywebview>=5.0
+pystray>=0.19

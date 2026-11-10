@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import screen_to_lights as sync  # noqa: E402
+import hass_ambilights as sync  # noqa: E402
 
 
 def main() -> int:

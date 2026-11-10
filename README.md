@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 1.0.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.0.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -24,10 +24,25 @@ web UI for every knob, and a colour pipeline that actually matches the panel.
 
 ## Install
 
-One file, one command. Download `screen_to_lights.py` and run it:
+### Windows
+
+Download `HassAmbilights.exe` from the [latest release](../../releases/latest) and run it.
+It opens a window with the settings page; closing the window quits. It is unsigned, so
+Windows SmartScreen shows "unknown publisher" the first time — *More info → Run anyway*.
+
+- Settings live in `%APPDATA%\HassAmbilights`, logs in `%LOCALAPPDATA%\HassAmbilights\logs`.
+- **Start with Windows** (Server card) adds a login entry that launches it in the tray;
+  the tray has *Open settings* and *Quit*.
+- Only one copy runs at a time — launching again focuses the running one, and a busy port
+  picks the next free one.
+- Build it yourself with `powershell -ExecutionPolicy Bypass -File packaging\build.ps1`.
+
+### Script
+
+One file, one command. Download `hass_ambilights.py` and run it:
 
 ```bash
-python screen_to_lights.py
+python hass_ambilights.py
 ```
 
 The first run creates `.venv` beside the script, installs what it needs (fastapi,
@@ -54,21 +69,24 @@ Prefer environment variables? They still work, and `config.json` beats them:
 export HA_URL=http://192.168.1.10:8123
 export HA_TOKEN=eyJ...
 export LIGHT_MAP="light.left_lamp=1,4,7; light.right_lamp=3,6,9"
-python screen_to_lights.py
+python hass_ambilights.py
 ```
 
 ```powershell
 # PowerShell
-$env:HA_URL="http://192.168.1.10:8123"; $env:HA_TOKEN="..."; python screen_to_lights.py
+$env:HA_URL="http://192.168.1.10:8123"; $env:HA_TOKEN="..."; python hass_ambilights.py
 ```
 
 Run it on the machine whose screen you want to mirror — `mss` needs a display, so a
 headless NAS can't capture. It logs a clear message and keeps serving the UI if it
 can't see one.
 
+Command line: `--window` (native window), `--tray` (tray icon only), `--server` (serve
+only, no window or tray — services and CI), `--calibrate`, `--no-browser`, `--version`.
+
 ## The settings UI
 
-`GET /` serves the UI that is embedded in `screen_to_lights.py` — no build step, no
+`GET /` serves the UI that is embedded in `hass_ambilights.py` — no build step, no
 separate asset, no dependencies beyond the app itself.
 
 - **Settings**, grouped (Colour · Brightness · Capture · Sending), each with a slider or
@@ -179,7 +197,7 @@ footer when it is overriding env values.
 | `GET /regions` | the nine zone colours for the current frame |
 | `GET /raw_grid` | the 64×36 sample grid |
 
-`python screen_to_lights.py --calibrate` pushes twelve test colours to one light,
+`python hass_ambilights.py --calibrate` pushes twelve test colours to one light,
 measures the chromaticity it reports back (expect du'v' ≈ 0.0001 on a healthy
 installation), and restores the previous state.
 
@@ -207,8 +225,8 @@ These cost the most time, so they're documented up front:
 
 ## Versioning
 
-`__version__` in `screen_to_lights.py` is the single source: it is printed by
-`python screen_to_lights.py --version`, shown in the UI footer, and returned by
+`__version__` in `hass_ambilights.py` is the single source: it is printed by
+`python hass_ambilights.py --version`, shown in the UI footer, and returned by
 `GET /health` and `GET /api/config`, so you can tell which build is actually running.
 
 MAJOR for changes that need you to do something (config or API), MINOR for new
@@ -219,7 +237,7 @@ current version.
 ## Development
 
 ```bash
-python tests/test_spotlight_sync.py      # 17 phases, fake screen + mock HA, no display needed
+python tests/test_hass_ambilights.py      # 17 phases, fake screen + mock HA, no display needed
 ```
 
 The test suite covers the colour maths (white point, sRGB primaries, linear averaging),
@@ -228,7 +246,7 @@ concurrent dispatch, the circuit breaker, capture cropping, dominant mode on let
 frames, the settings API (credentials never echoed, secrets kept out of `config.json`,
 loopback bind default), and that the embedded page is self-contained.
 
-The UI is a string in `screen_to_lights.py` (`UI_HTML`), not a separate asset — keep it
+The UI is a string in `hass_ambilights.py` (`UI_HTML`), not a separate asset — keep it
 that way, otherwise a copied file is no longer a working install.
 
 `tools/live_probe.py` sends a synthetic frame through the real sender and prints post

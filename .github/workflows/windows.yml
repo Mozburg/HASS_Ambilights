@@ -1,0 +1,95 @@
+name: windows
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write            # needed to attach the exe to a release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-gui.txt pyinstaller
+
+      - name: Generate icon and version resource
+        run: python packaging/make_assets.py
+
+      - name: Build one-file exe
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --name HassAmbilights `
+            --icon packaging/icon.ico `
+            --version-file packaging/version_info.txt `
+            --collect-submodules uvicorn `
+            --collect-submodules pystray `
+            --collect-submodules webview `
+            --hidden-import pystray._win32 `
+            --exclude-module tkinter `
+            --exclude-module matplotlib `
+            hass_ambilights.py
+
+      - name: Smoke test (server mode, no display needed)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:DRY_RUN = "1"
+          $env:HA_URL = "http://127.0.0.1:9"
+          $env:BIND_PORT = "8123"
+          $env:CONFIG_FILE = Join-Path $env:TEMP "hass-ambilights-ci.json"
+          $exe = "dist\HassAmbilights.exe"
+          if (-not (Test-Path $exe)) { throw "exe not built" }
+
+          $proc = Start-Process -FilePath $exe -ArgumentList "--server", "--no-browser" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $h = Invoke-RestMethod -Uri "http://127.0.0.1:8123/health" -TimeoutSec 2
+              $h | ConvertTo-Json -Depth 3 | Select-Object -First 1 | Write-Host
+              $version = $h.version
+              $ok = $true
+              break
+            } catch { }
+            if ($proc.HasExited) { break }
+          }
+          if (-not $ok) {
+            Write-Host "--- log ---"
+            $log = Join-Path $env:LOCALAPPDATA "HassAmbilights\logs\app.log"
+            if (Test-Path $log) { Get-Content $log -Tail 60 }
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            throw "the exe never answered /health"
+          }
+          Write-Host "health ok, version $version"
+          $page = Invoke-WebRequest -Uri "http://127.0.0.1:8123/" -UseBasicParsing -TimeoutSec 5
+          if ($page.Content -notmatch "Hass Ambilights") { throw "settings page did not render" }
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          if ($version -ne "$((Get-Content hass_ambilights.py | Select-String '__version__ = "([0-9.]+)"').Matches.Groups[1].Value)") {
+            throw "exe reports $version, source says something else"
+          }
+
+      - name: Upload the exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: HassAmbilights-windows
+          path: dist/HassAmbilights.exe
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/HassAmbilights.exe
+          fail_on_unmatched_files: true

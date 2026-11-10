@@ -587,6 +587,39 @@ m.BIND_HOST, m.BIND_PORT = _orig_bind
 m.BIND_HOST, m.BIND_PORT = _orig_bind
 print("bind ok: loopback default, URL rejected, port clamped, restart-tagged")
 
+# --- the single file is a complete install --------------------------------
+_ui = m.index_page()
+assert getattr(_ui, "status_code", 200) == 200, "GET / must serve the embedded page"
+_page = _ui.body.decode()
+for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="testconn"',
+               'id="settings"', "Screen → Lights"):
+    assert needle in _page, needle
+assert "/static/" not in _page, "page must not depend on external assets"
+assert len(m.UI_HTML) > 20000
+
+# the bootstrap list and requirements.txt must not drift apart
+_req = __import__("pathlib").Path(m.__file__).with_name("requirements.txt")
+if _req.exists():
+    names = set()
+    for line in _req.read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if line:
+            names.add(line.split("==")[0].split(">")[0].split("<")[0].strip().lower())
+    embedded = {p.lower() for p in m.BOOTSTRAP_PACKAGES}
+    assert names <= embedded, sorted(names - embedded)
+
+# config.json must never contain a secret placeholder
+import tempfile as _tempfile
+_cfg_path = __import__("pathlib").Path(_tempfile.mkdtemp()) / "config.json"
+_orig_cfg = m.CONFIG_PATH
+m.CONFIG_PATH = _cfg_path
+m.persist_config()
+_written = _json.loads(_cfg_path.read_text())
+assert "HA_TOKEN" not in _written, "secrets must not be written to config.json"
+assert "BIND_HOST" in _written and "HA_URL" in _written
+m.CONFIG_PATH = _orig_cfg
+print("single file ok: embedded UI, deps match requirements, no secret in config.json")
+
 # --- every HTTP handler must serialise (catches endpoint regressions) -----
 import json as _json
 

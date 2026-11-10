@@ -22,40 +22,52 @@ web UI for every knob, and a colour pipeline that actually matches the panel.
 
 ## Install
 
+One file, one command. Download `screen_to_lights.py` and run it:
+
 ```bash
-git clone https://github.com/Mozburg/HASS_Ambilights.git
-cd HASS_Ambilights
-python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+python screen_to_lights.py
 ```
 
-You need a Home Assistant **long-lived access token**: profile → *Security* →
-*Long-lived access tokens*.
+The first run creates `.venv` beside the script, installs what it needs (fastapi,
+uvicorn, mss, pillow, numpy, requests), and starts. It then opens
+<http://127.0.0.1:8000/> so you can paste your Home Assistant URL and a
+**long-lived access token** (profile → *Security* → *Long-lived access tokens*) into the
+**Home Assistant** card — no environment variables, no config file, nothing else to
+install. An environment that already has those packages is used as-is, so a venv you
+manage yourself works too.
 
-You can either put it in the environment (below) or paste it into the **Home Assistant**
-card in the settings UI on first run — the URL and token are saved server-side, so the
-app starts working without touching env vars. **Test connection** probes them before you
-commit to a save.
+The settings page is embedded in the script, so a single copied file is a complete
+install. Nothing needs a network round trip except the packages on first run.
+
+Subsequent runs start in about a second — the install is skipped once `.venv` is
+populated.
+
+Settings saved in the UI go to `config.json` next to the script and are applied live;
+that file outranks the environment, and the UI says so in the footer when it is
+overriding env values. The token is kept out of it, in `secrets.json` (0600).
+
+Prefer environment variables? They still work, and `config.json` beats them:
 
 ```bash
 export HA_URL=http://192.168.1.10:8123
 export HA_TOKEN=eyJ...
+export LIGHT_MAP="light.left_lamp=1,4,7; light.right_lamp=3,6,9"
 python screen_to_lights.py
 ```
 
-Then open <http://localhost:8000/> — that's the UI (below). Settings saved there go
-to `config.json` next to the script and are applied live; that file outranks the
-environment, and the UI tells you when it is overriding env values.
-
-Windows (PowerShell):
-
 ```powershell
+# PowerShell
 $env:HA_URL="http://192.168.1.10:8123"; $env:HA_TOKEN="..."; python screen_to_lights.py
 ```
 
+Run it on the machine whose screen you want to mirror — `mss` needs a display, so a
+headless NAS can't capture. It logs a clear message and keeps serving the UI if it
+can't see one.
+
 ## The settings UI
 
-`GET /` serves a single-file UI — no build step, no dependencies beyond the app itself.
+`GET /` serves the UI that is embedded in `screen_to_lights.py` — no build step, no
+separate asset, no dependencies beyond the app itself.
 
 - **Settings**, grouped (Colour · Brightness · Capture · Sending), each with a slider or
   select and a one-line explanation. Fields that need a restart are tagged `restart`.
@@ -169,13 +181,17 @@ These cost the most time, so they're documented up front:
 ## Development
 
 ```bash
-python tests/test_spotlight_sync.py      # 13 phases, fake screen + mock HA, no display needed
+python tests/test_spotlight_sync.py      # 15 phases, fake screen + mock HA, no display needed
 ```
 
 The test suite covers the colour maths (white point, sRGB primaries, linear averaging),
 zone splitting, per-light dedupe and rescue, stale-frame dropping, BUSY handling,
-concurrent dispatch, the circuit breaker, capture cropping, and dominant mode on
-letterboxed frames.
+concurrent dispatch, the circuit breaker, capture cropping, dominant mode on letterboxed
+frames, the settings API (credentials never echoed, secrets kept out of `config.json`,
+loopback bind default), and that the embedded page is self-contained.
+
+The UI is a string in `screen_to_lights.py` (`UI_HTML`), not a separate asset — keep it
+that way, otherwise a copied file is no longer a working install.
 
 `tools/live_probe.py` sends a synthetic frame through the real sender and prints post
 rate, cycle time and per-light counters — useful when tuning against actual hardware.

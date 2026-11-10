@@ -1,5 +1,7 @@
 # HASS Ambilights
 
+**Version 1.0.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
 
@@ -173,7 +175,7 @@ footer when it is overriding env values.
 | `GET /api/monitors` | monitors mss can capture, for the Monitor picker (0 = all combined) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
-| `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
+| `GET /health` | `version` plus live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
 | `GET /regions` | the nine zone colours for the current frame |
 | `GET /raw_grid` | the 64×36 sample grid |
 
@@ -202,6 +204,17 @@ These cost the most time, so they're documented up front:
   hold two seconds), not as an outage.
 - **A `color_temp` change sent with `transition > 0` can be silently dropped** by a ZHA
   group, so restores are sent with `transition: 0` and verified.
+
+## Versioning
+
+`__version__` in `screen_to_lights.py` is the single source: it is printed by
+`python screen_to_lights.py --version`, shown in the UI footer, and returned by
+`GET /health` and `GET /api/config`, so you can tell which build is actually running.
+
+MAJOR for changes that need you to do something (config or API), MINOR for new
+capability, PATCH for fixes. Releases are git tags `vX.Y.Z` with a matching
+`CHANGELOG.md` entry — the test suite fails if the changelog has no section for the
+current version.
 
 ## Development
 

@@ -59,6 +59,7 @@ from typing import Any
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -187,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1002,6 +1003,21 @@ function renderSettings() {
     const body = document.createElement("div");
     body.className = "body";
     items.filter((m) => !m.advanced).forEach((m) => body.appendChild(settingRow(m)));
+    if (group === "Sending") {                 // the tuning button belongs at the top
+      const tune = document.createElement("div");
+      tune.className = "actions";
+      tune.style.padding = "0 0 10px";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "btn"; btn.id = "autotune";
+      btn.textContent = "Auto tune…";
+      btn.title = "Measure the fastest pacing these lights accept, using every light";
+      const status = document.createElement("span");
+      status.className = "mono"; status.id = "autotunestatus";
+      status.style.fontSize = "12px";
+      btn.onclick = autotuneNow;
+      tune.append(btn, status);
+      body.insertBefore(tune, body.firstChild);     // top of the card, above the knobs
+    }
     const advanced = items.filter((m) => m.advanced);
     if (advanced.length) {
       const box = document.createElement("details");
@@ -1015,21 +1031,6 @@ function renderSettings() {
       advanced.forEach((m) => inner.appendChild(settingRow(m)));
       box.append(summary, inner);
       body.appendChild(box);
-    }
-    if (group === "Sending") {
-      const tune = document.createElement("div");
-      tune.className = "actions";
-      tune.style.padding = "10px 0 0";
-      const btn = document.createElement("button");
-      btn.type = "button"; btn.className = "btn"; btn.id = "autotune";
-      btn.textContent = "Auto tune…";
-      btn.title = "Measure the fastest pacing these lights accept";
-      const status = document.createElement("span");
-      status.className = "mono"; status.id = "autotunestatus";
-      status.style.fontSize = "12px";
-      btn.onclick = autotuneNow;
-      tune.append(btn, status);
-      body.appendChild(tune);
     }
     if (group === "Home Assistant") {
       // test the URL/token where they are edited, not in a separate strip
@@ -1423,9 +1424,10 @@ on("refreshlights", "click", async () => {
 });
 async function autotuneNow() {
   const status = $("autotunestatus");
-  if (!confirm("Auto tune sends a short burst of commands to the first light, "
-             + "brightening and dimming it for about ten seconds, then picks the "
-             + "fastest pacing it accepted.\n\nContinue?")) return;
+  const howMany = LIGHTS.filter((l) => l.entity.trim()).length || 1;
+  if (!confirm(`Auto tune sends a short burst of commands to all ${howMany} light`
+             + `${howMany === 1 ? "" : "s"}, brightening and dimming them for about `
+             + "ten seconds, then picks the fastest pacing they accepted.\n\nContinue?")) return;
   $("autotune").disabled = true;
   status.textContent = "measuring…";
   try {
@@ -1439,7 +1441,9 @@ async function autotuneNow() {
       if (s.autotuning) continue;
       const report = s.autotune || {};
       if (report.ok) {
+        const lights = report.light_count || 0;
         const message = `✔ ${report.floor.toFixed(2)}–${report.ceiling.toFixed(2)} s`
+          + (lights ? ` · ${lights} light${lights === 1 ? "" : "s"}` : "")
           + (report.busy_at_ms ? ` (rejected at ${report.busy_at_ms} ms)` : " (no rejections)");
         await reload();                 // applied live; the badge asks you to save
         const fresh = $("autotunestatus");   // reload rebuilds the card
@@ -2655,25 +2659,51 @@ POST_INTERVAL_CEILING_MAX = 2.00
 AUTOTUNE_STEPS = (0.45, 0.35, 0.26, 0.20, 0.15, 0.12, 0.09, 0.07)
 
 
-def autotune(verbose: bool = True, per_step: int = 5) -> dict:
-    """Stress the lights and pick a pacing they accept without dropping commands.
+AUTOTUNE_COLOURS = ([255, 190, 110], [120, 180, 255], [255, 120, 150],
+                     [150, 255, 150], [230, 230, 230])
 
-    The radio is the bottleneck, not the host: a Zigbee group starts answering
-    "queue BUSY" somewhere around five or six commands a second. Rather than make
-    people guess POST_INTERVAL_FLOOR, send a burst at decreasing intervals and
-    keep the fastest one that came back clean. The light is restored afterwards.
+
+def _autotune_attrs(targets) -> list[dict]:
+    """What each light is showing now, so it can be put back."""
+    restores = []
+    for target in targets:
+        try:
+            attrs = session.get(f"{HA_URL}/api/states/{target.entity_id}",
+                                headers=auth_headers(), timeout=5).json().get("attributes", {})
+        except (requests.RequestException, ValueError, AttributeError):
+            attrs = {}
+        restores.append({
+            "entity_id": target.entity_id,
+            "rgb_color": attrs.get("rgb_color") or [255, 200, 120],
+            "brightness": attrs.get("brightness") or 140,
+            "transition": 0,
+        })
+    return restores
+
+
+def autotune(verbose: bool = True, per_step: int = 4) -> dict:
+    """Stress **every** configured light and pick a pacing the radio accepts.
+
+    The bottleneck is the radio, and it has to carry one command per light per
+    frame - so a single-light probe flatters the result. Each round sends a
+    command to every target (concurrently, like the sender does), and a round
+    only counts as clean if all of them came back. Every light is restored
+    afterwards.
     """
-    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
+    targets = list(TARGETS) or [Target(LIGHT_ENTITY_ID, frozenset(range(1, ZONE_COUNT + 1)))]
     report = {
-        "entity": entity,
+        "entity": targets[0].entity_id,
+        "lights": [t.entity_id for t in targets],
+        "light_count": len(targets),
         "dry_run": DRY_RUN,
         "steps": [],
         "floor": None,
         "ceiling": None,
         "best_ms": None,
         "busy_at_ms": None,
+        "worst_rtt_ms": None,
         "applied": {},
-        "restored": False,
+        "restored": 0,
         "ok": False,
         "error": None,
     }
@@ -2686,67 +2716,83 @@ def autotune(verbose: bool = True, per_step: int = 5) -> dict:
         report["error"] = "Home Assistant is unreachable or the token was rejected"
         return report
 
-    try:
-        attrs = session.get(f"{HA_URL}/api/states/{entity}", headers=auth_headers(),
-                            timeout=5).json().get("attributes", {})
-    except requests.RequestException as exc:
-        report["error"] = f"could not read the light's current state: {exc}"
-        return report
-    restore = {
-        "entity_id": entity,
-        "rgb_color": attrs.get("rgb_color") or [255, 200, 120],
-        "brightness": attrs.get("brightness") or 140,
-        "transition": 0,
-    }
+    restores = _autotune_attrs(targets)
 
-    basis = report.get("floor") or POST_INTERVAL_FLOOR
+    def round_bodies(round_no: int) -> list[dict]:
+        return [{"entity_id": t.entity_id,
+                 "rgb_color": list(AUTOTUNE_COLOURS[i % len(AUTOTUNE_COLOURS)]),
+                 "brightness": 120 if round_no % 2 else 200,
+                 "transition": 0}
+                for i, t in enumerate(targets)]
+
+    def fire(round_no: int) -> tuple[int, int, float, str | None]:
+        """One command to every light. Returns (ok, busy, worst_rtt_ms, error)."""
+        bodies = round_bodies(round_no)
+        started = time.perf_counter()
+
+        def post_one(body):
+            began = time.perf_counter()
+            try:
+                response = _post(body, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as exc:
+                return False, (time.perf_counter() - began) * 1000.0, str(exc)[:80]
+            return response.ok, (time.perf_counter() - began) * 1000.0, response.text
+
+        if SEND_CONCURRENCY and len(bodies) > 1:
+            with ThreadPoolExecutor(max_workers=len(bodies)) as pool:
+                results = list(pool.map(post_one, bodies))
+        else:
+            results = [post_one(b) for b in bodies]
+        ok = sum(1 for good, _ms, _txt in results if good)
+        busy = len(results) - ok
+        worst = max(ms for _good, ms, _txt in results) if results else 0.0
+        problems = [txt for good, _ms, txt in results if not good and txt]
+        wall = (time.perf_counter() - started) * 1000.0
+        return ok, busy, max(worst, wall), (problems[0][:80] if problems else None)
+
     accepted = []
     try:
         for interval in AUTOTUNE_STEPS:
-            ok = busy = 0
+            clean = 0
+            rejected = 0
             rtts = []
+            error = None
             for n in range(per_step):
-                body = {"entity_id": entity, "rgb_color": [255, 190, 110],
-                        "brightness": 120 if n % 2 else 200, "transition": 0}
-                started = time.perf_counter()
-                try:
-                    response = _post(body, timeout=REQUEST_TIMEOUT)
-                except requests.RequestException as exc:
-                    report["steps"].append({"interval_ms": round(interval * 1000),
-                                            "ok": ok, "busy": busy + 1,
-                                            "rtt_ms": None, "error": str(exc)[:80]})
-                    busy += 1
-                    break
-                rtts.append((time.perf_counter() - started) * 1000.0)
-                if response.ok:
-                    ok += 1
-                elif is_queue_busy(response.text):
-                    busy += 1
+                ok, busy, rtt, problem = fire(n)
+                rtts.append(rtt)
+                if busy == 0 and ok == len(targets):
+                    clean += 1
                 else:
-                    busy += 1
+                    rejected += 1
+                    error = error or problem
                 time.sleep(interval)
-            step = {"interval_ms": round(interval * 1000), "ok": ok, "busy": busy,
+            step = {"interval_ms": round(interval * 1000), "ok": clean,
+                    "busy": rejected,
                     "rtt_ms": round(sorted(rtts)[len(rtts) // 2], 1) if rtts else None}
+            if error:
+                step["error"] = error
             report["steps"].append(step)
-            say(f"  {step['interval_ms']:>4} ms between commands: "
-                f"{ok} ok, {busy} rejected, rtt {step['rtt_ms']} ms")
-            if busy:
+            say(f"  {step['interval_ms']:>4} ms for {len(targets)} light(s): "
+                f"{clean} clean, {rejected} rejected, rtt {step['rtt_ms']} ms")
+            if rejected:
                 report["busy_at_ms"] = step["interval_ms"]
                 break
             accepted.append(interval)
+            report["worst_rtt_ms"] = step["rtt_ms"]
     finally:
         # the burst just filled the radio's queue, so wait at least as long as the
-        # fastest interval we were willing to accept before putting the light back
+        # fastest interval we were willing to accept before putting the lights back
         gap = max(0.25, (accepted[-1] * 1.2) if accepted else 0.5)
-        for attempt in range(3):
+        for _attempt in range(3):
             time.sleep(gap)
-            if restore_light(restore, attempts=2):
-                report["restored"] = True
+            restored = sum(1 for restore in restores if restore_light(restore, attempts=2))
+            if restored == len(restores):
                 break
+        report["restored"] = restored
 
     if not accepted:
         report["error"] = ("even the slowest probe was rejected - the radio is busy or "
-                           "the coordinator is down")
+                          "the coordinator is down")
         return report
 
     floor = accepted[-1] * 1.15                       # a margin, not the cliff edge
@@ -2763,9 +2809,9 @@ def autotune(verbose: bool = True, per_step: int = 5) -> dict:
         report["error"] = "; ".join(errors)
         return report
     report["ok"] = True
-    say(f"  -> {floor:.2f}-{ceiling:.2f} s between commands "
-        f"(busy at {report['busy_at_ms']} ms)" if report["busy_at_ms"]
-        else f"  -> {floor:.2f}-{ceiling:.2f} s between commands (no rejection seen)")
+    say(f"  -> {floor:.2f}-{ceiling:.2f} s between commands for {len(targets)} light(s) "
+        + (f"(rejected at {report['busy_at_ms']} ms)" if report["busy_at_ms"]
+           else "(no rejection seen)"))
     return report
 
 

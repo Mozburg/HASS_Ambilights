@@ -8,6 +8,17 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-11-10
+
+### Changed
+- **Auto tune probes every configured light**, not just the first. Each round sends a
+  command to all of them (concurrently, exactly as the sender does) and only counts as
+  clean if every light answered, so the pacing it picks is the one your whole setup can
+  keep up with. All lights are restored afterwards, and the result says how many were
+  measured: `✔ 0.23–0.92 s · 3 lights (rejected at 150 ms)`.
+- The Auto tune button sits at the top of the Sending card, above the pacing knobs it
+  changes, and its confirmation names the lights it is about to flash.
+
 ## [2.2.0] — 2026-11-10
 
 ### Added

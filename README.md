@@ -71,11 +71,15 @@ separate asset, no dependencies beyond the app itself.
 
 - **Settings**, grouped (Colour · Brightness · Capture · Sending), each with a slider or
   select and a one-line explanation. Fields that need a restart are tagged `restart`.
-- **Lights**: a row per light with its entity id and a 3×3 zone picker. Add or remove
-  rows; zones are serialised back into `LIGHT_MAP`.
+- **Lights**: a row per light, picked from your Home Assistant's own light entities
+  (`GET /api/lights`) rather than typed — friendly name, entity id, and `(no colour)`
+  marked on the ones that can't do hue. **↻ From Home Assistant** reloads the list;
+  typing by hand is still possible when the instance can't be reached. Each row has its
+  own 3×3 zone picker, and zones are serialised back into `LIGHT_MAP`.
 - **Save & apply** validates everything before touching anything — one bad value
-  rejects the whole request with the reason. **Revert** reloads from the server,
-  **Reset to defaults** rewrites `config.json`.
+  rejects the whole request with the reason — and only reports the settings that
+  actually changed, so the restart reminder names just the knobs you touched.
+  **Revert** reloads from the server, **Reset to defaults** rewrites `config.json`.
 - **Live panel**: a row per light showing its current colour chip, hex, brightness and
   counters; a nine-cell strip of the zone colours (outlined cells are the ones in use);
   and posts/sec, frame age, prep time, cycle time, pace/transition, busy · stalls ·
@@ -146,6 +150,7 @@ footer when it is overriding env values.
 | `GET /` | settings UI |
 | `GET /api/config` | current settings + metadata + light list |
 | `POST /api/config` | validate, apply live, persist (`{"settings":{...}}`, or `{"reset":true}`) |
+| `GET /api/lights` | light entities from HA for the picker (30 s cache, `?refresh=1` to bypass) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
 | `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
@@ -181,7 +186,7 @@ These cost the most time, so they're documented up front:
 ## Development
 
 ```bash
-python tests/test_spotlight_sync.py      # 15 phases, fake screen + mock HA, no display needed
+python tests/test_spotlight_sync.py      # 17 phases, fake screen + mock HA, no display needed
 ```
 
 The test suite covers the colour maths (white point, sRGB primaries, linear averaging),

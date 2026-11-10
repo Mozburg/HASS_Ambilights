@@ -702,6 +702,24 @@ assert m.cells_for(_col, _grid, _cells).shape[0] == 22 * 36
 m.aggregate(_stitched)                                     # must not raise
 print("ragged zones ok: 22/21 column blocks stitch into one cell list")
 
+# --- semantic versioning ---------------------------------------------------
+import re as _re
+
+_ver = m.__version__
+assert _re.fullmatch(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", _ver), _ver
+assert m.health()["version"] == _ver
+assert m.get_config()["version"] == _ver
+assert f'v{_ver}' in m.UI_HTML or 'id="version"' in m.UI_HTML, "the UI must show the version"
+_changelog = Path(m.__file__).with_name("CHANGELOG.md")
+if _changelog.exists():
+    text = _changelog.read_text()
+    assert f"## [{_ver}]" in text, f"CHANGELOG has no section for {_ver}"
+    # the version in the README must not drift from the code
+    readme = Path(m.__file__).with_name("README.md")
+    if readme.exists():
+        assert _ver in readme.read_text(), "README does not mention the current version"
+print(f"versioning ok: {_ver} exposed in /health, /api/config, UI and CHANGELOG")
+
 # --- bad TRANSITION must not reach the sender ------------------------------
 for bad in ("", "   ", "abc"):
     assert m.apply_settings({"TRANSITION": bad})[1], f"TRANSITION {bad!r} should be rejected"

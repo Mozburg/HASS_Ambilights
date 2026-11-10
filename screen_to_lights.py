@@ -180,6 +180,15 @@ except ImportError:        # older releases only ship mss.mss
     from mss import mss
 from PIL import Image
 
+# ----------------------------------------------------------------- version ---
+# Semantic versioning (https://semver.org): MAJOR.MINOR.PATCH
+#   MAJOR - a change that needs the user to do something (config/API break)
+#   MINOR - a new capability, backwards compatible
+#   PATCH - a bug fix
+# Bump this before tagging a release; CI checks the format and the CHANGELOG.
+__version__ = "1.0.0"
+
+
 # ---------------------------------------------------------------- config ----
 def _env(name: str, default: str) -> str:
     return os.getenv(name, default).strip()
@@ -554,6 +563,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <button class="btn" id="revert" type="button">Revert</button>
       <button class="btn" id="calibrate" type="button">Calibrate…</button>
       <button class="btn danger" id="reset" type="button">Reset to defaults</button>
+      <small class="mono" id="version"></small>
       <small class="mono" id="cfgpath"></small>
     </div>
   </div>
@@ -991,6 +1001,8 @@ async function reload() {
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
   if (ENTITIES === null) await loadEntities(false);   // first paint only
   if (MONITORS === null) await loadMonitors();
+  $("version").textContent = data.version ? "v" + data.version : "";
+  $("version").title = "Screen to Lights " + (data.version || "");
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
@@ -2711,6 +2723,7 @@ def get_regions():
 @app.get("/health")
 def health():
     return {
+        "version": __version__,
         "ha_url": HA_URL,
         "fps": CAPTURE_FPS,
         "capture_stride": CAPTURE_STRIDE,
@@ -2819,6 +2832,7 @@ def favicon():
 @app.get("/api/config")
 def get_config():
     return {
+        "version": __version__,
         "settings": settings_snapshot(),
         "meta": SETTINGS,
         "config_path": str(CONFIG_PATH),
@@ -2961,6 +2975,8 @@ def post_calibrate():
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
+    parser.add_argument("--version", action="version",
+                        version=f"screen_to_lights {__version__}")
     parser.add_argument("--calibrate", action="store_true",
                         help="measure this light's colour accuracy, then restore its state")
     parser.add_argument("--no-browser", action="store_true",

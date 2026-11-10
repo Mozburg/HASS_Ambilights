@@ -450,8 +450,12 @@ def run_phase(seconds, busy=0, mode="cycle", colour=(10, 200, 60), rtt=0.0, targ
 
 
 # --- phase A: static screen -> one post despite 30 fps --------------------
-run_phase(0.8, mode="solid", colour=(200, 60, 40))
-assert len(POSTS) == 1, "static screen should post once, got %d" % len(POSTS)
+# repeated: the sender used to be able to lose the race between queueing a frame
+# and recording it, which let a second identical post through now and then
+for _attempt in range(4):
+    run_phase(0.8, mode="solid", colour=(200, 60, 40))
+    assert len(POSTS) == 1, "static screen posted %d times on attempt %d" % (
+        len(POSTS), _attempt + 1)
 assert m.stats["idle"] is True, "static screen should drop to IDLE_FPS"
 assert m.stats["frames"] <= 8, "idle throttle not working: %d frames" % m.stats["frames"]
 print("phase A: 1 post for %d frames (dedupe + idle at %.0f fps)" % (m.stats["frames"], m.IDLE_FPS))
@@ -605,6 +609,24 @@ assert m.BIND_PORT == 65535, m.BIND_PORT            # clamped, not crashed
 m.BIND_HOST, m.BIND_PORT = _orig_bind
 m.BIND_HOST, m.BIND_PORT = _orig_bind
 print("bind ok: loopback default, URL rejected, port clamped, restart-tagged")
+
+# --- zones that span ragged 3x3 splits (64 -> 22/21/21 columns) ------------
+_grid = np.zeros((m.GRID_SIZE[1], m.GRID_SIZE[0], 3), dtype=np.float32)   # 64x36
+_cells = m.zones_cells(_grid)
+assert all(c.ndim == 2 and c.shape[1] == 3 for c in _cells), [c.shape for c in _cells]
+_widths = sorted({c.shape[0] for c in _cells})
+assert _widths == [252, 264], f"expected ragged zone sizes, got {_widths}"   # 21*12, 22*12
+_span = m.Target("light.wide", frozenset({1, 2}))          # columns 1+2: 22 then 21 wide
+_stitched = m.cells_for(_span, _grid, _cells)
+assert _stitched.shape == (22 * 12 + 21 * 12, 3), _stitched.shape
+_row = m.Target("light.row", frozenset({1, 2, 3}))         # whole top row
+assert m.cells_for(_row, _grid, _cells).shape[0] == 64 * 12
+_whole = m.Target("light.all", frozenset(range(1, 10)))
+assert m.cells_for(_whole, _grid, _cells).shape == (64 * 36, 3)
+_col = m.Target("light.col", frozenset({1, 4, 7}))         # one column, the old case
+assert m.cells_for(_col, _grid, _cells).shape[0] == 22 * 36
+m.aggregate(_stitched)                                     # must not raise
+print("ragged zones ok: 22/21 column blocks stitch into one cell list")
 
 # --- light picker: entities come from Home Assistant ----------------------
 _orig_token = m.HA_TOKEN

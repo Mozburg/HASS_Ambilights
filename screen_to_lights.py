@@ -1717,12 +1717,19 @@ def aggregate(cells_lin: np.ndarray) -> dict:
 
 
 def zones_cells(lin: np.ndarray) -> list[np.ndarray]:
-    return [lin[r][:, c] for r, c in ZONE_INDEX]
+    """Flat (N, 3) cells per zone.
+
+    The 3x3 split is ragged - 64 columns become 22/21/21 and 36 rows become
+    12/12/12 - so a zone spanning two column groups has a different width from
+    its neighbour. Stitching those blocks together only works once each block is
+    flattened to a list of cells.
+    """
+    return [lin[np.ix_(r, c)].reshape(-1, 3) for r, c in ZONE_INDEX]
 
 
 def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> np.ndarray:
     if len(target.zones) == 9:
-        return lin
+        return lin.reshape(-1, 3)
     return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
 
 
@@ -2371,8 +2378,12 @@ def capture_loop() -> None:
                     colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
                 colour["measured_at"] = measured_at
                 light_report[target.entity_id] = colour
-                if should_send(target, colour, brightness_for_colour(colour)):
+                brightness = brightness_for_colour(colour)
+                if should_send(target, colour, brightness):
                     batch[target.entity_id] = colour
+                    # record it now: the sender may not post for a few ms, and
+                    # dedupe has to hold for that window too
+                    target.last_attempted = (tuple(colour["rgb"]), brightness)
 
             with state_lock:
                 latest_data["raw_grid"] = grid        # serialised on request only

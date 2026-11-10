@@ -308,10 +308,14 @@ tg.last_sent = ((100, 100, 100), 100)
 tg.last_success_mono = time.perf_counter()
 assert m.should_send(tg, colour, 100) is False
 tg.last_sent = ((255, 0, 0), 200)                       # light stuck on something else
-tg.last_success_mono = time.perf_counter() - (m.RESEND_AFTER + 1)
+tg.last_attempt_mono = time.perf_counter() - (m.RESEND_AFTER + 1)
 assert m.should_send(tg, colour, 100) is True
-tg.last_success_mono = time.perf_counter()              # too soon: wait, don't retry
+tg.last_attempt_mono = time.perf_counter()              # too soon: wait, don't retry
 assert m.should_send(tg, colour, 100) is False
+# an attempt still in flight (queued, not yet confirmed) must not be re-queued
+tg.last_attempted = ((100, 100, 100), 100)
+tg.last_attempt_mono = time.perf_counter()
+assert m.should_send(tg, colour, 100) is False, "in-flight frame was re-queued"
 other = m.Target("light.b", frozenset({2}))
 assert m.should_send(other, colour, 100) is True        # state is per light
 print("per-light dedupe ok (%.1fs rescue)" % m.RESEND_AFTER)
@@ -437,7 +441,7 @@ def run_phase(seconds, busy=0, mode="cycle", colour=(10, 200, 60), rtt=0.0, targ
     m.TARGETS = targets if targets is not None else [m.Target("light.a", frozenset(range(1, 10)))]
     for t in m.TARGETS:
         t.last_attempted = t.last_sent = None
-        t.last_success_mono = 0.0
+        t.last_success_mono = t.last_attempt_mono = 0.0
         t.posts = t.busy = t.errors = 0
     w = threading.Thread(target=m.capture_loop, daemon=True)
     p = threading.Thread(target=m.sender_loop, daemon=True)
@@ -533,7 +537,9 @@ print("phase F: merged call ->", body["entity_id"])
 targets = [m.Target("light.left", frozenset({1, 4, 7})),
            m.Target("light.center", frozenset({2, 5, 8})),
            m.Target("light.right", frozenset({3, 6, 9}))]
-run_phase(1.0, mode="zones", rtt=0.12, targets=targets)
+# a changing screen, so repeated posts are the thing being measured rather than
+# a dedupe accident: 3 lights x 120 ms RTT must overlap, not serialise
+run_phase(1.0, mode="cycle", rtt=0.12, targets=targets)
 assert m.stats["posts"] >= 6, m.stats["posts"]
 assert m.stats["cycle_ms"] < 260, "cycle %.0f ms looks serial, not concurrent" % m.stats["cycle_ms"]
 print("phase G: 3 lights, 120 ms each -> cycle %.0f ms (serial would be ~360)" % m.stats["cycle_ms"])

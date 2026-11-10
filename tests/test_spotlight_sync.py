@@ -640,6 +640,40 @@ assert len(_bins_help) > 80, "help text too terse to be useful"
 assert _meta["HUE_BINS"]["min"] == 6 and _meta["HUE_BINS"]["max"] == 72
 print("help text ok: hue bins explains its effect and its range")
 
+# --- edits apply live but only Save writes the file -----------------------
+import pathlib as _pathlib
+_cfg = _pathlib.Path(tempfile.mkdtemp()) / "config.json"
+_orig_cfg, _orig_mix = m.CONFIG_PATH, m.DOMINANT_MIX
+m.CONFIG_PATH = _cfg
+m.post_config({"settings": {"DOMINANT_MIX": 0.25}})          # persisted baseline
+_baseline = _json.loads(_cfg.read_text())["DOMINANT_MIX"]
+assert _baseline == 0.25 and m.get_config()["unsaved"] is False
+
+_live = m.post_config({"settings": {"DOMINANT_MIX": 0.9}, "persist": False})
+assert _live["persisted"] is False
+assert m.DOMINANT_MIX == 0.9, "a live edit must reach the running process"
+assert _json.loads(_cfg.read_text())["DOMINANT_MIX"] == 0.25, "live edit must not touch the file"
+assert m.get_config()["unsaved"] is True
+assert m.get_config()["saved_settings"]["DOMINANT_MIX"] == 0.25
+
+m.post_config({"settings": {"DOMINANT_MIX": 0.9}})           # now persist
+assert _json.loads(_cfg.read_text())["DOMINANT_MIX"] == 0.9
+assert m.get_config()["unsaved"] is False
+m.CONFIG_PATH, m.DOMINANT_MIX = _orig_cfg, _orig_mix
+print("live apply ok: applies without writing, Save persists, Revert has a target")
+
+# --- advanced sections and settings that only apply in some modes ---------
+_meta = {m_entry["name"]: m_entry for m_entry in m.get_config()["meta"]}
+_advanced = [n for n, v in _meta.items() if v.get("advanced")]
+assert len(_advanced) >= 15, _advanced
+assert _meta["HUE_BINS"].get("advanced") is True
+assert _meta["SEND_MODE"].get("advanced") is True
+assert _meta["COLOR_ALGO"].get("advanced") is not True, "the everyday knob must stay visible"
+assert _meta["SATURATION_GAIN"]["show_if"] == {"SATURATION_BOOST": True}
+assert _meta["HUE_BINS"]["show_if"] == {"COLOR_ALGO": "dominant"}
+assert "CHROMA_FLOOR" in _advanced and "TRANSITION" in _advanced
+print(f"advanced ok: {len(_advanced)} of {len(_meta)} settings collapsed, dependencies expressed")
+
 # --- unchanged settings are not reported as needing a restart -------------
 _orig_port = m.BIND_PORT
 _now = m.settings_snapshot()
@@ -658,7 +692,8 @@ _ui = m.index_page()
 assert getattr(_ui, "status_code", 200) == 200, "GET / must serve the embedded page"
 _page = _ui.body.decode()
 for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="refreshlights"',
-               'id="lights"', "Screen → Lights", "Test connection"):
+               'id="lights"', "Screen → Lights", "Test connection",
+               'className = "adv"', "function refreshVisibility", "row.hidden = !visible"):
     assert needle in _page, needle
 assert "/static/" not in _page, "page must not depend on external assets"
 assert len(m.UI_HTML) > 20000

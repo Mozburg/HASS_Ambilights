@@ -402,6 +402,15 @@ UI_HTML = r"""<!DOCTYPE html>
   .row{display:grid;grid-template-columns:210px 1fr;gap:16px;align-items:start;padding:10px 0;
     border-top:1px dashed rgba(255,255,255,.06)}
   .row:first-child{border-top:0}
+  .adv{margin-top:10px;border-top:1px solid var(--line)}
+  .adv>summary{cursor:pointer;padding:9px 0 0;font-size:12px;letter-spacing:.04em;
+    text-transform:uppercase;color:var(--muted);list-style:none;user-select:none}
+  .adv>summary::-webkit-details-marker{display:none}
+  .adv>summary:before{content:"▸  ";font-size:11px}
+  .adv[open]>summary:before{content:"▾  "}
+  .adv>summary:hover{color:var(--text)}
+  .adv .row:first-of-type{margin-top:8px}
+  .row[hidden]{display:none}
   .row.restart-required .label:after{content:"restart";margin-left:8px;font-size:10px;letter-spacing:.06em;
     text-transform:uppercase;color:var(--warn);border:1px solid rgba(210,153,34,.5);border-radius:4px;
     padding:1px 4px;vertical-align:middle}
@@ -537,6 +546,10 @@ UI_HTML = r"""<!DOCTYPE html>
 <script>
 let META = [], CFG = {}, LIGHTS = [], dirty = false, lastPosts = null, lastPostT = null, rate = 0;
 let LASTCONFIG = null;
+let SAVED = {};               // what is on disk, for Revert and the badge
+let liveTimer = null, liveSeq = 0;
+const NOT_LIVE = ["HA_URL", "HA_TOKEN"];   // typing these must not reconnect mid-word
+const ADV_OPEN = {};          // remembered "Advanced" disclosure state per card
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -550,8 +563,10 @@ const toast = (msg, err) => {
   t._t = setTimeout(() => { t.className = ""; }, err ? 7000 : 2600);
 };
 
-function setDirty(v) {
+function setDirty(v, live) {
   dirty = v;
+  if (v && live !== false) applyLive();
+  refreshVisibility();
   $("dirtybadge").hidden = !v;
   $("save").disabled = !v;
   $("revert").disabled = !v;
@@ -615,7 +630,7 @@ function renderLights() {
         name.appendChild(o);
       });
       if (!light.entity) name.value = "";
-      name.onchange = () => { LIGHTS[i].entity = name.value; setDirty(true); markUsedZones(); };
+      name.onchange = () => { LIGHTS[i].entity = name.value; setDirty(true, true); markUsedZones(); };
     } else {
       name = document.createElement("input");
       name.type = "text";
@@ -623,7 +638,7 @@ function renderLights() {
       name.placeholder = "light.left_lamp";
       name.id = `light-${i}`;
       name.setAttribute("aria-label", `Light ${i + 1} entity id`);
-      name.oninput = () => { LIGHTS[i].entity = name.value; setDirty(true); };
+      name.oninput = () => { LIGHTS[i].entity = name.value; setDirty(true, true); };
     }
 
     const zones = document.createElement("div");
@@ -641,7 +656,7 @@ function renderLights() {
         light.zones.has(z) ? light.zones.delete(z) : light.zones.add(z);
         b.className = light.zones.has(z) ? "on" : "";
         b.setAttribute("aria-pressed", light.zones.has(z) ? "true" : "false");
-        setDirty(true);
+        setDirty(true, true);
         markUsedZones();
       };
       zones.appendChild(b);
@@ -658,7 +673,7 @@ function renderLights() {
     del.textContent = "✕";
     del.title = `Remove ${light.entity || "light"}`;
     del.setAttribute("aria-label", `Remove light ${light.entity || i + 1}`);
-    del.onclick = () => { LIGHTS.splice(i, 1); setDirty(true); renderLights(); markUsedZones(); };
+    del.onclick = () => { LIGHTS.splice(i, 1); setDirty(true, true); renderLights(); markUsedZones(); };
 
     row.append(name, zones, chip, del);
     box.appendChild(row);
@@ -668,7 +683,7 @@ function renderLights() {
 
 function addLight() {
   LIGHTS.push({ entity: "", zones: new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]) });
-  setDirty(true);
+  setDirty(true, true);
   renderLights();
 }
 
@@ -692,7 +707,7 @@ function control(meta, value) {
     const cb = document.createElement("input");
     cb.type = "checkbox"; cb.checked = !!value; cb.id = id;
     const sp = document.createElement("span");
-    cb.onchange = () => { CFG[meta.name] = cb.checked; setDirty(true); };
+    cb.onchange = () => { CFG[meta.name] = cb.checked; setDirty(true, true); };
     label.append(cb, sp);
     wrap.appendChild(label);
     return wrap;
@@ -706,7 +721,7 @@ function control(meta, value) {
       if (v === value) o.selected = true;
       sel.appendChild(o);
     });
-    sel.onchange = () => { CFG[meta.name] = sel.value; setDirty(true); };
+    sel.onchange = () => { CFG[meta.name] = sel.value; setDirty(true, true); };
     wrap.appendChild(sel);
     return wrap;
   }
@@ -719,7 +734,7 @@ function control(meta, value) {
       only.setAttribute("aria-label", meta.label);
       only.onchange = () => {
         const v = Math.min(+only.max, Math.max(+only.min, Math.round(+only.value)));
-        only.value = v; CFG[meta.name] = v; setDirty(true);
+        only.value = v; CFG[meta.name] = v; setDirty(true, true);
       };
       wrap.appendChild(only);
       return wrap;
@@ -736,7 +751,7 @@ function control(meta, value) {
     num.setAttribute("aria-label", `${meta.label} value`);
     const sync = (v) => {
       v = Math.min(+range.max, Math.max(+range.min, +v));
-      CFG[meta.name] = v; range.value = v; num.value = v; setDirty(true);
+      CFG[meta.name] = v; range.value = v; num.value = v; setDirty(true, true);
     };
     range.oninput = () => sync(range.value);
     num.onchange = () => sync(num.value);
@@ -751,7 +766,7 @@ function control(meta, value) {
     secret.autocomplete = "new-password";
     secret.value = "";
     secret.placeholder = isSet ? "●●●● saved — type to replace" : "paste a long-lived token";
-    secret.oninput = () => { CFG[meta.name] = secret.value; setDirty(true); };
+    secret.oninput = () => { CFG[meta.name] = secret.value; setDirty(true, true); };
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "btn";
@@ -761,16 +776,54 @@ function control(meta, value) {
     clear.onclick = () => {
       CFG[meta.name] = "--clear--";
       secret.value = ""; secret.placeholder = "cleared on save"; clear.disabled = true;
-      setDirty(true);
+      setDirty(true, true);
     };
     wrap.append(secret, clear);
     return wrap;
   }
   const text = document.createElement("input");
   text.type = "text"; text.value = value ?? ""; text.id = id;
-  text.oninput = () => { CFG[meta.name] = text.value; setDirty(true); };
+  text.oninput = () => { CFG[meta.name] = text.value; setDirty(true, true); };
   wrap.appendChild(text);
   return wrap;
+}
+
+function settingRow(m) {
+  const row = document.createElement("div");
+  row.className = "row" + (m.restart ? " restart-required" : "");
+  row.dataset.setting = m.name;
+  if (m.show_if) row.dataset.showIf = JSON.stringify(m.show_if);
+  const left = document.createElement("div");
+  const lab = document.createElement("label");
+  lab.className = "label";
+  lab.htmlFor = `set-${m.name}`;
+  lab.textContent = m.label;
+  const help = document.createElement("div");
+  help.className = "help";
+  help.textContent = m.help || "";
+  left.append(lab, help);
+  row.append(left, control(m, CFG[m.name]));
+  return row;
+}
+
+// a setting that the current mode doesn't use is hidden, not disabled:
+// disabled controls look broken and still invite a click
+function refreshVisibility() {
+  document.querySelectorAll("#settings .row[data-show-if]").forEach((row) => {
+    let rule;
+    try { rule = JSON.parse(row.dataset.showIf); } catch (e) { return; }
+    const visible = Object.entries(rule).every(([name, want]) => {
+      const got = CFG[name];
+      return String(got) === String(want) || (typeof want === "boolean" && !!got === want);
+    });
+    row.hidden = !visible;
+  });
+  document.querySelectorAll("#settings details.adv").forEach((box) => {
+    const shown = [...box.querySelectorAll(".row[data-setting]")].filter((r) => !r.hidden).length;
+    const total = box.querySelectorAll(".row[data-setting]").length;
+    box.querySelector("summary").textContent =
+      "Advanced" + (shown === total ? ` (${total})` : ` (${shown} of ${total})`);
+  });
 }
 
 function renderSettings() {
@@ -784,21 +837,21 @@ function renderSettings() {
     card.innerHTML = `<h2>${esc(group)}</h2>`;
     const body = document.createElement("div");
     body.className = "body";
-    items.forEach((m) => {
-      const row = document.createElement("div");
-      row.className = "row" + (m.restart ? " restart-required" : "");
-      const left = document.createElement("div");
-      const lab = document.createElement("label");
-      lab.className = "label";
-      lab.htmlFor = `set-${m.name}`;
-      lab.textContent = m.label;
-      const help = document.createElement("div");
-      help.className = "help";
-      help.textContent = m.help || "";
-      left.append(lab, help);
-      row.append(left, control(m, CFG[m.name]));
-      body.appendChild(row);
-    });
+    items.filter((m) => !m.advanced).forEach((m) => body.appendChild(settingRow(m)));
+    const advanced = items.filter((m) => m.advanced);
+    if (advanced.length) {
+      const box = document.createElement("details");
+      box.className = "adv";
+      box.open = !!ADV_OPEN[group];
+      box.ontoggle = () => { ADV_OPEN[group] = box.open; };
+      const summary = document.createElement("summary");
+      summary.textContent = "Advanced";
+      const inner = document.createElement("div");
+      inner.className = "advbody";
+      advanced.forEach((m) => inner.appendChild(settingRow(m)));
+      box.append(summary, inner);
+      body.appendChild(box);
+    }
     if (group === "Home Assistant") {
       // test the URL/token where they are edited, not in a separate strip
       const conn = document.createElement("div");
@@ -817,6 +870,7 @@ function renderSettings() {
     card.appendChild(body);
     host.appendChild(card);
   });
+  refreshVisibility();
 }
 
 /* ------------------------------------------------------------------ data -- */
@@ -864,13 +918,36 @@ async function reload() {
   }
   META = data.meta;
   CFG = data.settings;
+  SAVED = data.saved_settings || {};
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
   if (ENTITIES === null) await loadEntities(false);   // first paint only
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
   renderLights();
-  setDirty(false);
+  setDirty(!!data.unsaved);        // live values that the file doesn't have yet
+}
+
+function applyLive() {
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(async () => {
+    const seq = ++liveSeq;
+    const settings = {};
+    Object.keys(CFG).forEach((k) => { if (!NOT_LIVE.includes(k)) settings[k] = CFG[k]; });
+    try {
+      const r = await fetch("/api/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings, persist: false }),
+      });
+      if (seq !== liveSeq) return;                 // a newer edit won
+      const data = await r.json();
+      if (!data.ok) { toast("Ignored: " + data.errors.join(" · "), true); return; }
+      LASTCONFIG = LASTCONFIG || {};
+      LASTCONFIG.restart_required = data.restart_required || [];
+    } catch (e) {
+      toast("Live apply failed: " + e.message, true);
+    }
+  }, 350);
 }
 
 async function save() {
@@ -888,7 +965,7 @@ async function save() {
       $("save").disabled = false;
       return;
     }
-    let msg = "Saved & applied";
+    let msg = data.persisted === false ? "Applied (not saved)" : "Saved & applied";
     if (data.restart_required.length) msg += " — restart to apply " + data.restart_required.join(", ");
     if (data.connection && data.connection.detail !== "unchanged") {
       msg += " · HA: " + data.connection.detail;
@@ -900,6 +977,17 @@ async function save() {
     toast("Save failed: " + e.message, true);
     $("save").disabled = false;
   }
+}
+
+async function revertToSaved() {
+  if (SAVED && Object.keys(SAVED).length) {
+    await fetch("/api/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: SAVED, persist: false }),
+    }).catch(() => {});
+  }
+  await reload();
+  toast("Reverted to the saved file");
 }
 
 async function resetDefaults() {
@@ -1062,7 +1150,7 @@ function on(id, event, handler) {
   return el;
 }
 on("save", "click", save);
-on("revert", "click", reload);
+on("revert", "click", revertToSaved);
 on("reset", "click", resetDefaults);
 on("calibrate", "click", calibrate);
 on("addlight", "click", addLight);
@@ -1124,32 +1212,31 @@ SETTINGS = [
           "cluster, neutral/white cells ignored.", values=["mean", "dominant"]),
     _spec("DOMINANT_MIX", "float", 0.5, "Colour", "Dominant mix",
           "0 = pure average, 1 = pure dominant colour. Blended in u'v' (perceptually uniform).",
-          min=0.0, max=1.0, step=0.05),
+          min=0.0, max=1.0, step=0.05, show_if={"COLOR_ALGO": "dominant"}),
     _spec("DOMINANT_LUMINANCE", "enum", "cluster", "Colour", "Dominant brightness",
           "cluster = the dominant object's own luminance; region = the zone's mean. "
-          "Only matters when dominant mix > 0.", values=["cluster", "region"]),
+          "Only matters when dominant mix > 0.", values=["cluster", "region"], advanced=True, show_if={"COLOR_ALGO": "dominant"}),
     _spec("CHROMA_FLOOR", "float", 0.010, "Colour", "Neutral threshold",
           "du'v' below this counts as neutral when picking the dominant colour.",
-          min=0.001, max=0.05, step=0.001),
+          min=0.001, max=0.05, step=0.001, advanced=True, show_if={"COLOR_ALGO": "dominant"}),
     _spec("HUE_BINS", "int", 24, "Colour", "Hue bins",
           "Dominant mode's hue resolution (24 = 15° buckets, averaged with their "
           "neighbours). Lower merges similar hues; higher separates them but can "
           "flicker.",
-          min=6, max=72),
+          min=6, max=72, advanced=True, show_if={"COLOR_ALGO": "dominant"}),
     _spec("SATURATION_BOOST", "bool", False, "Colour", "Saturation boost",
           "Push chroma away from white as the frame gets brighter. Off sends the "
           "measured colour untouched."),
     _spec("SATURATION_GAIN", "float", 0.8, "Colour", "Boost strength",
           "k = 1 + gain * luminance^curve, capped at max. Only used when boost is on.",
-          min=0.0, max=2.0, step=0.05),
+          min=0.0, max=2.0, step=0.05, advanced=True, show_if={"SATURATION_BOOST": True}),
     _spec("SATURATION_CURVE", "float", 0.6, "Colour", "Boost curve",
-          "Lower = the boost kicks in at darker frames.", min=0.2, max=2.0, step=0.05),
+          "Lower = the boost kicks in at darker frames.", min=0.2, max=2.0, step=0.05, advanced=True, show_if={"SATURATION_BOOST": True}),
     _spec("SATURATION_MAX", "float", 2.2, "Colour", "Boost cap",
-          "Upper bound for k. Gamut clamping applies on top.", min=1.0, max=4.0, step=0.1),
+          "Upper bound for k. Gamut clamping applies on top.", min=1.0, max=4.0, step=0.1, advanced=True, show_if={"SATURATION_BOOST": True}),
     _spec("SEND_MODE", "enum", "xy", "Colour", "Payload colour space",
           "xy = chromaticity (precise, recommended). rgb = legacy rgb_color.",
-          values=["xy", "rgb"]),
-
+          values=["xy", "rgb"], advanced=True),
     _spec("SEND_BRIGHTNESS", "bool", True, "Brightness", "Send brightness",
           "Turn brightness updates off to leave the lamp's level alone."),
     _spec("BRIGHTNESS_FROM", "enum", "lstar", "Brightness", "Brightness source",
@@ -1164,18 +1251,18 @@ SETTINGS = [
           min=1.0, max=60.0, step=1.0),
     _spec("CAPTURE_STRIDE", "int", 4, "Capture", "Pixel stride",
           "Use every Nth pixel: 1 = lossless and expensive, 4 = 1/16 of the pixels.",
-          min=1, max=16, restart=False),
+          min=1, max=16, restart=False, advanced=True),
     _spec("IDLE_FPS", "float", 4.0, "Capture", "Idle rate",
-          "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.5),
+          "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.5, advanced=True),
     _spec("IDLE_AFTER", "int", 3, "Capture", "Idle after",
-          "Identical frames before dropping to the idle rate.", min=0, max=60),
+          "Identical frames before dropping to the idle rate.", min=0, max=60, advanced=True),
     _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor index",
           "mss monitor: 0 = all monitors, 1 = primary. Needs a restart.",
           min=0, max=8, restart=True),
 
     _spec("TRANSITION", "string", "auto", "Sending", "Transition",
           "'auto' matches the ramp to the achieved post interval; a number (seconds) "
-          "pins it; 0 snaps."),
+          "pins it; 0 snaps.", advanced=True),
     _spec("POST_INTERVAL_FLOOR", "float", 0.15, "Sending", "Fastest pacing",
           "Minimum time between commands. Raise it if the Zigbee controller keeps resetting.",
           min=0.05, max=1.0, step=0.01),
@@ -1183,25 +1270,25 @@ SETTINGS = [
           "Pacing is allowed to grow to this when the radio reports BUSY.",
           min=0.1, max=3.0, step=0.05),
     _spec("SEND_CONCURRENCY", "bool", True, "Sending", "Concurrent sends",
-          "Issue each cycle's lights at once instead of waiting for each device ack."),
+          "Issue each cycle's lights at once instead of waiting for each device ack.", advanced=True),
     _spec("MIN_DELTA_E", "float", 1.0, "Sending", "Colour deadband",
           "Skip a frame unless the colour moves this far (CIELAB dE76). Higher = fewer commands.",
-          min=0.0, max=10.0, step=0.1),
+          min=0.0, max=10.0, step=0.1, advanced=True),
     _spec("MIN_BRIGHTNESS_DELTA", "int", 4, "Sending", "Brightness deadband",
-          "Skip a frame unless brightness moves this much (0-255).", min=0, max=64),
+          "Skip a frame unless brightness moves this much (0-255).", min=0, max=64, advanced=True),
     _spec("RESEND_AFTER", "float", 3.0, "Sending", "Rescue interval",
           "Re-send an unconfirmed colour after this many seconds if nothing landed.",
-          min=0.0, max=60.0, step=0.5),
+          min=0.0, max=60.0, step=0.5, advanced=True),
     _spec("REQUEST_TIMEOUT", "float", 3.0, "Sending", "HA request timeout",
           "Seconds to wait for a command. A ZHA call answers only after the Zigbee exchange.",
-          min=0.5, max=30.0, step=0.5),
+          min=0.5, max=30.0, step=0.5, advanced=True),
     _spec("RADIO_PAUSE", "float", 2.0, "Sending", "Radio stall hold-off",
           "How long to stop sending after the coordinator reports a stall.",
-          min=0.0, max=30.0, step=0.5),
+          min=0.0, max=30.0, step=0.5, advanced=True),
     _spec("FAIL_THRESHOLD", "int", 3, "Sending", "Breaker threshold",
-          "Consecutive host-level failures before pausing sends.", min=1, max=20),
+          "Consecutive host-level failures before pausing sends.", min=1, max=20, advanced=True),
     _spec("FAIL_COOLDOWN", "float", 10.0, "Sending", "Breaker cooldown",
-          "Seconds to pause when Home Assistant is unreachable.", min=1.0, max=300.0, step=1.0),
+          "Seconds to pause when Home Assistant is unreachable.", min=1.0, max=300.0, step=1.0, advanced=True),
     _spec("DRY_RUN", "bool", False, "Sending", "Dry run",
           "Log payloads instead of sending them."),
     _spec("LIGHT_MAP", "string", "", "Lights", "Light map",
@@ -1295,7 +1382,10 @@ def load_secrets() -> None:
 
 def persist_config(path: Path | None = None) -> bool:
     path = path or CONFIG_PATH
-    data = {name: value for name, value in settings_snapshot().items()
+    snapshot = settings_snapshot()
+    PERSISTED.clear()
+    PERSISTED.update(snapshot)
+    data = {name: value for name, value in snapshot.items()
             if SETTINGS_BY_NAME.get(name, {}).get("type") != "secret"}
     try:
         path.write_text(json.dumps(data, indent=2) + "\n")
@@ -1379,6 +1469,8 @@ def load_config_file(path: Path | None = None) -> None:
     if errors:
         log.error("config problems in %s: %s", path, "; ".join(errors))
     CONFIG_LOADED = True
+    PERSISTED.clear()
+    PERSISTED.update(settings_snapshot())
     log.info("loaded %d setting(s) from %s", len(applied), path)
 
 
@@ -2309,6 +2401,8 @@ async def lifespan(_app: FastAPI):
         ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
         load_secrets()
         load_config_file()
+    if not PERSISTED:                          # no config.json yet: revert to boot values
+        PERSISTED.update(settings_snapshot())
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
     check_ha()
     stop_event.clear()
@@ -2372,6 +2466,8 @@ def index_page():
     return HTMLResponse(UI_HTML, headers={"Cache-Control": "no-store"})
 
 
+# what is on disk, so the UI can tell "changed" from "saved"
+PERSISTED = {}
 LIGHTS_CACHE = {"at": 0.0, "data": None}
 LIGHTS_CACHE_TTL = 30.0
 
@@ -2434,6 +2530,10 @@ def get_config():
         "config_exists": CONFIG_PATH.exists(),
         "ha_url": HA_URL,
         "ha_token_set": bool(HA_TOKEN),
+        # what a Save would write: lets Revert restore the file, and lets a
+        # page load say "these values are live but unsaved"
+        "saved_settings": dict(PERSISTED) if PERSISTED else settings_snapshot(),
+        "unsaved": bool(PERSISTED) and PERSISTED != settings_snapshot(),
         "secrets_path": str(SECRETS_PATH),
         "secrets_exist": SECRETS_PATH.exists(),
         # values the saved file is overriding, so the UI can say so out loud
@@ -2466,10 +2566,12 @@ def post_test_connection(payload: dict = Body(default={})):
 def post_config(payload: dict = Body(...)):
     """Save settings. Validated as a whole: nothing is applied on any error."""
     before = settings_snapshot()
+    persist = bool(payload.get("persist", True))
     if payload.get("reset"):
-        applied, errors = apply_settings({s["name"]: s["default"] for s in SETTINGS})
+        applied, errors = apply_settings({s["name"]: s["default"] for s in SETTINGS},
+                                         persist=persist)
     else:
-        applied, errors = apply_settings(payload.get("settings", payload))
+        applied, errors = apply_settings(payload.get("settings", payload), persist=persist)
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
     # the UI posts every setting, so report what actually changed rather than
@@ -2488,7 +2590,7 @@ def post_config(payload: dict = Body(...)):
         for name, value in applied.items()
     }
     return {"ok": True, "applied": safe_applied, "settings": settings_snapshot(),
-            "connection": probe,
+            "persisted": persist, "connection": probe,
             "restart_required": sorted(n for n in changed
                                         if SETTINGS_BY_NAME.get(n, {}).get("restart"))}
 

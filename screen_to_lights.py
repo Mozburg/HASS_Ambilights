@@ -53,6 +53,7 @@ import argparse
 import json
 import logging
 import math
+import socket
 from typing import Any
 import os
 import sys
@@ -88,6 +89,19 @@ def _requirements() -> tuple:
     return tuple(lines) if lines else BOOTSTRAP_PACKAGES
 
 
+def _deps_import(python) -> bool:
+    """Does that interpreter actually import everything? Cheap enough per run."""
+    import subprocess
+
+    try:
+        result = subprocess.run([str(python), "-c",
+                                 "import " + ", ".join(REQUIRED_MODULES)],
+                                capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
 def _bootstrap_venv():
     """Create .venv beside this file, install the dependencies, return its python."""
     import subprocess
@@ -100,21 +114,38 @@ def _bootstrap_venv():
 
     marker = venv_dir / ".deps-ok"
     wanted = " ".join(packages)
-    if python.exists() and marker.exists() and marker.read_text().strip() == wanted:
-        return python                     # already provisioned: no work on later runs
-    if not python.exists():
-        print("first run: creating %s" % venv_dir, flush=True)
+    if python.exists() and marker.exists() and marker.read_text().strip() == wanted \
+            and _deps_import(python):
+        return python                     # provisioned and actually importable
+    if venv_dir.exists():
+        # the marker said ready but the packages are not: an interrupted install
+        # or a copied/restored directory. Start the environment again.
+        print("%s is incomplete - rebuilding it" % venv_dir, flush=True)
+        import shutil
+
+        try:
+            shutil.rmtree(venv_dir)
+        except OSError as exc:
+            raise SystemExit("cannot rebuild %s (%s).\nDelete that directory by hand "
+                             "and re-run." % (venv_dir, exc))
+    print("first run: creating %s" % venv_dir, flush=True)
+    try:
         venv.EnvBuilder(with_pip=True, clear=False).create(str(venv_dir))
+    except OSError as exc:
+        raise SystemExit("cannot create %s: %s\nRun this from a directory you can write "
+                         "to, or install the dependencies yourself and re-run."
+                         % (venv_dir, exc))
     print("installing %s (once)" % ", ".join(packages), flush=True)
     try:
         subprocess.check_call([str(python), "-m", "pip", "install", "--quiet",
                                "--disable-pip-version-check", *packages])
-        marker.write_text(wanted + "\n")
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError):
         raise SystemExit(
-            "could not install dependencies automatically (%s).\n"
-            "Install them yourself and re-run:\n"
-            "    %s -m pip install %s" % (exc, python, " ".join(packages)))
+            "could not install the dependencies (see the message above).\n"
+            "Check your network and requirements.txt, then run this again.\n"
+            "To install by hand:\n    %s -m pip install %s"
+            % (python, " ".join(packages)))
+    marker.write_text(wanted + "\n")
     return python
 
 
@@ -1354,8 +1385,49 @@ SETTINGS.extend([
 
 SETTINGS_BY_NAME = {s["name"]: s for s in SETTINGS}
 SECRETS_PATH = Path(os.getenv("SECRETS_FILE") or CONFIG_PATH.with_name("secrets.json"))
-BIND_HOST = _env("BIND_HOST", "127.0.0.1")
-BIND_PORT = int(_env("BIND_PORT", "8000"))
+def valid_bind_host(value: str) -> bool:
+    """An address uvicorn can actually bind: wildcard, IP literal or hostname."""
+    import ipaddress
+    import re
+
+    host = (value or "").strip()
+    if not host or "://" in host or "/" in host or " " in host:
+        return False
+    if host in ("0.0.0.0", "::", "localhost"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        if re.fullmatch(r"[0-9.]+", host):
+            return False        # looks like an IP but isn't one (999.999.999.999)
+    return bool(re.fullmatch(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*",
+                            host))
+
+
+def _env_bind_host() -> str:
+    raw = _env("BIND_HOST", "127.0.0.1")
+    if valid_bind_host(raw):
+        return raw
+    print(f"BIND_HOST {raw!r} is not an address this machine can bind - using 127.0.0.1",
+          file=sys.stderr)
+    return "127.0.0.1"
+
+
+def _env_bind_port() -> int:
+    raw = _env("BIND_PORT", "8000")
+    try:
+        port = int(raw)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        print(f"BIND_PORT {raw!r} must be between 1 and 65535 - using 8000", file=sys.stderr)
+        return 8000
+    return port
+
+
+BIND_HOST = _env_bind_host()
+BIND_PORT = _env_bind_port()
 SECRET_SET = "<set>"
 SECRET_UNSET = "<unset>"
 
@@ -1479,10 +1551,26 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
             new[name] = _coerce(spec, raw)
         except (TypeError, ValueError) as exc:
             errors.append(f"{name}: {exc}")
+    if "TRANSITION" in new:
+        raw = str(new["TRANSITION"]).strip()
+        if raw.lower() == "auto":
+            new["TRANSITION"] = "auto"
+        else:
+            try:
+                seconds = float(raw)
+            except (TypeError, ValueError):
+                errors.append('TRANSITION: must be "auto" or a number of seconds')
+                new.pop("TRANSITION")
+            else:
+                if not 0.0 <= seconds <= 5.0:
+                    errors.append("TRANSITION: must be between 0 and 5 seconds")
+                    new.pop("TRANSITION")
+                else:
+                    new["TRANSITION"] = raw
     if "BIND_HOST" in new:
         host = str(new["BIND_HOST"]).strip()
-        if "://" in host or "/" in host or " " in host or not host:
-            errors.append("BIND_HOST: a bare address such as 127.0.0.1 or 0.0.0.0")
+        if not valid_bind_host(host):
+            errors.append("BIND_HOST: an address such as 127.0.0.1, 0.0.0.0 or a hostname")
             new.pop("BIND_HOST")
         else:
             new["BIND_HOST"] = host
@@ -1529,6 +1617,7 @@ CONFIG_LOADED = False
 def load_config_file(path: Path | None = None) -> None:
     global CONFIG_LOADED
     path = path or CONFIG_PATH
+    CONFIG_LOADED = True                  # one attempt, one log line
     if not path.exists():
         return
     try:
@@ -1536,13 +1625,25 @@ def load_config_file(path: Path | None = None) -> None:
     except (OSError, ValueError) as exc:
         log.error("ignoring %s: %s", path, exc)
         return
-    applied, errors = apply_settings(data, persist=False)
+    if not isinstance(data, dict):
+        log.error("ignoring %s: the top level must be an object", path)
+        CONFIG_LOADED = True
+        return
+    unknown = sorted(set(data) - set(SETTINGS_BY_NAME))
+    if unknown:
+        # one typo used to discard every other setting in the file
+        log.warning("ignoring unknown key(s) in %s: %s", path, ", ".join(unknown))
+    known = {k: v for k, v in data.items() if k in SETTINGS_BY_NAME}
+    applied, errors = apply_settings(known, persist=False)
     if errors:
         log.error("config problems in %s: %s", path, "; ".join(errors))
     CONFIG_LOADED = True
     PERSISTED.clear()
     PERSISTED.update(settings_snapshot())
-    log.info("loaded %d setting(s) from %s", len(applied), path)
+    if applied:
+        log.info("loaded %d setting(s) from %s", len(applied), path)
+    else:
+        log.warning("nothing usable in %s - running on defaults", path)
 
 
 
@@ -1712,6 +1813,20 @@ def saturation_factor(luminance: float) -> float:
     return min(SATURATION_MAX, 1.0 + SATURATION_GAIN * (lum ** SATURATION_CURVE))
 
 
+def valid_xy(xy) -> bool:
+    """Is this a chromaticity Home Assistant will accept?
+
+    Boosting a saturated colour can step outside the CIE xy domain (y <= 0),
+    which real HA rejects with 400 on every frame, and which converts to
+    rgb 0,0,0 in rgb mode - a black light instead of a blue one.
+    """
+    try:
+        x, y = float(xy[0]), float(xy[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return 0.0 <= x <= 1.0 and 0.0 < y <= 1.0 and (x + y) <= 1.0
+
+
 def boost_saturation(xy, luminance: float) -> tuple[tuple[float, float], float]:
     """Push chromaticity away from D65 along its own hue, clipped to sRGB."""
     k = saturation_factor(luminance)
@@ -1726,14 +1841,14 @@ def boost_saturation(xy, luminance: float) -> tuple[tuple[float, float], float]:
         return xy, 1.0
 
     target = _uv_to_xy((wu + k * du, wv + k * dv))
-    if _in_srgb_gamut(target):
+    if _in_srgb_gamut(target) and valid_xy(target):
         return target, k
     lo, hi = 1.0, k
     best = xy
     for _ in range(14):
         mid = (lo + hi) / 2.0
         cand = _uv_to_xy((wu + mid * du, wv + mid * dv))
-        if _in_srgb_gamut(cand):
+        if _in_srgb_gamut(cand) and valid_xy(cand):
             best, lo = cand, mid
         else:
             hi = mid
@@ -1854,7 +1969,12 @@ def should_send(target: Target, colour: dict, brightness: int) -> bool:
 
 def current_transition() -> float:
     if TRANSITION != "auto":
-        return max(0.0, float(TRANSITION))
+        try:
+            return max(0.0, float(TRANSITION))
+        except (TypeError, ValueError):
+            # a bad value used to raise here, inside the sender thread, which
+            # then died for good and stopped driving the lights
+            log.error("TRANSITION %r is not a number - using auto", TRANSITION)
     interval = stats["interval_ms"]
     if interval is None:
         return MIN_TRANSITION
@@ -1868,7 +1988,10 @@ def preview_colour(colour: dict) -> dict:
     is the post-boost, post-clamp colour at the brightness that gets sent - not
     the raw average of the screen.
     """
-    xy, k = boost_saturation(tuple(colour["xy"]), colour["luminance"])
+    base = tuple(colour["xy"])
+    xy, k = boost_saturation(base, colour["luminance"])
+    if not valid_xy(xy):
+        xy, k = (base if valid_xy(base) else D65_XY), 1.0
     brightness = brightness_for_colour(colour) if SEND_BRIGHTNESS else 255
     rgb = srgb_from_xy(xy, max(brightness / 255.0, 1e-4))
     return {
@@ -1889,7 +2012,8 @@ def build_payload(colour: dict) -> dict:
     if SEND_MODE == "rgb":
         rgb = srgb_from_xy(xy, max(colour["luminance"], 1e-4))
         peak = max(max(rgb), 1)          # HA reads chromaticity from rgb_color
-        payload["rgb_color"] = [int(round(c * 255.0 / peak)) for c in rgb]
+        scaled = [int(round(c * 255.0 / peak)) for c in rgb]
+        payload["rgb_color"] = scaled if max(scaled) > 0 else [255, 255, 255]
     else:
         payload["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
     if SEND_BRIGHTNESS:
@@ -2001,6 +2125,15 @@ def group_payloads(payloads: dict[str, dict]) -> list[tuple[dict, list[str]]]:
 
 def sender_loop() -> None:
     """Post the newest colours at the rate the Zigbee radio can actually take."""
+    try:
+        _sender_loop()
+    except Exception:                     # never lose the sender for good
+        log.exception("sender loop stopped unexpectedly")
+        stats["send_errors"] = stats.get("send_errors", 0) + 1
+
+
+def _sender_loop() -> None:
+    """Where the work happens; wrapped above so the thread cannot die."""
     global _last_error_log
 
     pace = FIXED_POST_INTERVAL if FIXED_POST_INTERVAL > 0 else max(
@@ -2069,7 +2202,11 @@ def sender_loop() -> None:
         ages = []
         for entity, colour in item.items():
             ages.append((time.perf_counter() - colour.get("measured_at", time.perf_counter())) * 1000.0)
-            payloads[entity] = build_payload(colour)
+            try:
+                payloads[entity] = build_payload(colour)
+            except Exception as exc:          # one bad colour must not kill the thread
+                stats["send_errors"] = stats.get("send_errors", 0) + 1
+                log.error("Could not build a payload for %s: %s", entity, exc)
         age_ms = min(ages) if ages else 0.0
         stats["age_ms"] = round(age_ms, 1) if stats["age_ms"] is None else round(
             0.8 * stats["age_ms"] + 0.2 * age_ms, 1)

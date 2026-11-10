@@ -1,0 +1,1467 @@
+#!/usr/bin/env python3
+"""Mirror chosen parts of the screen onto any number of Home Assistant lights.
+
+Zones: the screen is split into a 3x3 grid, numbered in reading order
+
+     1 2 3
+     4 5 6
+     7 8 9
+
+Each light gets its own zone list (1 to all 9), e.g.
+
+     LIGHT_MAP="light.left_lamp=1,4,7; light.right_lamp=3,6,9"
+     LIGHT_MAP="light.desk=all"              # everything
+     LIGHT_MAP="light.a=5; light.b=1-3"      # centre only / whole top row
+
+Lights that resolve to identical colour+brightness are sent in ONE service call
+with an entity_id list, so the Zigbee radio isn't asked to do the same work twice.
+
+Colour accuracy: chromaticity (xy) is sent directly, computed from a LINEAR-light
+average with the sRGB D65 matrix - on a physical lamp the round trip lands within
+about du'v' 0.0001 (0.003 ~= one just-noticeable step). Sending rgb_color instead
+lets HA apply its Hue-wide-gamut matrix and drift by up to du'v' 0.09.
+
+Colour modes: COLOR_ALGO=mean mirrors the average radiance of the chosen zones;
+COLOR_ALGO=dominant (default) mirrors their most prominent COLOURED cluster, with
+neutral/white cells ignored. DOMINANT_MIX blends the two in u'v'.
+
+Brightness: mapped from screen relative luminance across the light's full
+1-255 range with no clamps and no dead band (0 = off in HA, so 1 is the floor).
+
+Speed/smoothness: capture and send are decoupled. The capture thread samples at
+CAPTURE_FPS into a one-slot mailbox; a sender thread always posts the NEWEST
+colour and drops stale frames. Posting is paced to what the Zigbee radio can
+take (a few commands per second on a typical mesh) and backs off on "queue BUSY";
+the lamp transition auto-tracks the achieved interval so ramps chain smoothly.
+
+Install:
+    pip install fastapi uvicorn mss pillow numpy requests
+
+Run:
+    export HA_TOKEN=<long-lived token from HA profile -> Security>
+    export LIGHT_MAP="light.left_lamp=1,4,7; light.right_lamp=3,6,9"
+    python screen_to_lights.py
+
+Check accuracy on your hardware (12 test colours, restores the light):
+    python screen_to_lights.py --calibrate
+
+Endpoints: GET /  GET /api/config  GET /health  GET /regions  GET /raw_grid
+"""
+
+
+import argparse
+import json
+import logging
+import os
+import threading
+import time
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import numpy as np
+import requests
+import uvicorn
+from fastapi import Body, FastAPI
+from fastapi.responses import FileResponse, JSONResponse
+from mss import mss
+from PIL import Image
+
+# ---------------------------------------------------------------- config ----
+def _env(name: str, default: str) -> str:
+    return os.getenv(name, default).strip()
+
+
+HA_URL = _env("HA_URL", "http://homeassistant.local:8123").rstrip("/")
+if HA_URL.endswith("/api"):  # tolerate the old "http://host/api" style
+    HA_URL = HA_URL[: -len("/api")]
+HA_TOKEN = _env("HA_TOKEN", "")
+
+# Default light when LIGHT_MAP is empty: the whole screen onto this entity.
+LIGHT_ENTITY_ID = _env("LIGHT_ENTITY_ID", "light.desk_lights")
+LIGHT_MAP = _env("LIGHT_MAP", "")
+
+CAPTURE_FPS = float(_env("CAPTURE_FPS", "12"))
+# The Zigbee mesh is the bottleneck, not the network: a ZHA group takes
+# roughly five commands/sec before ZHA starts answering 500 "Failed to enqueue
+# message: BUSY". Pacing below whatever your mesh sustains is what keeps the ramps
+# smooth.
+POST_INTERVAL_FLOOR = float(_env("POST_INTERVAL_FLOOR", "0.15"))
+POST_INTERVAL_CEILING = float(_env("POST_INTERVAL_CEILING", "0.6"))
+FIXED_POST_INTERVAL = float(_env("POST_INTERVAL", "0"))
+# Issue each cycle's lights at once instead of awaiting each device ack in turn.
+SEND_CONCURRENCY = _env("SEND_CONCURRENCY", "1") == "1"
+# Circuit breaker: after N consecutive failures stop sending for a while instead
+# of burning a request timeout on every frame.
+FAIL_THRESHOLD = int(_env("FAIL_THRESHOLD", "3"))
+FAIL_COOLDOWN = float(_env("FAIL_COOLDOWN", "10"))
+# Per-command HTTP timeout. A ZHA service call answers only after the Zigbee
+# exchange, so this doubles as "how long to wait for the radio".
+REQUEST_TIMEOUT = float(_env("REQUEST_TIMEOUT", "3"))
+# How long to hold off after the Zigbee controller reports a stall (bellows NCP
+# reset, "ApplicationController is not running", device did not respond).
+RADIO_PAUSE = float(_env("RADIO_PAUSE", "2.0"))
+
+# "the radio is unhappy" is not one condition:
+#   queue busy  = ZHA's outbound queue is full, the frame was dropped -> pace backoff
+#   controller  = the coordinator/NCP is restarting, commands hang -> pace + hold off
+QUEUE_BUSY_MARKERS = ("failed to enqueue", "enqueue message", "sl_status.busy")
+STALL_MARKERS = (
+    "applicationcontroller is not running",
+    "device did not respond",
+    "no aps ack",
+    "ncp",
+    "ash",
+    "controllererror",
+)
+
+
+def is_queue_busy(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in QUEUE_BUSY_MARKERS)
+
+
+def is_radio_stall(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in STALL_MARKERS)
+
+
+# "auto" = transition follows the measured post interval; a number pins it (s).
+TRANSITION = _env("TRANSITION", "auto")
+MIN_TRANSITION = float(_env("MIN_TRANSITION", "0.12"))
+MAX_TRANSITION = float(_env("MAX_TRANSITION", "0.9"))
+
+# 64x36 cells: fine enough that the gamma value inside a cell is nearly uniform
+# (so the per-cell mean is honest) and that thirds land on real boundaries.
+GRID_SIZE = (64, 36)                              # (width, height)
+MONITOR_INDEX = int(_env("MONITOR_INDEX", "1"))   # mss: 0 = all, 1 = primary
+
+# Capture cost at 4K is dominated by converting the BGRA frame to RGB. Instead of
+# mss's `shot.rgb` (a 24 MB strided copy, ~44 ms/frame measured) the buffer is
+# read as a zero-copy BGRA view and every Nth pixel is used, then PIL decodes
+# BGRA natively ('BGRX') - 6 ms/frame measured. 1 = every pixel (lossless,
+# ~27 ms), 4 = 1/16 of the pixels: measured max zone-level colour error dE76 2.3
+# on an edge-dense synthetic page, mean 1.45.
+CAPTURE_STRIDE = max(1, int(_env("CAPTURE_STRIDE", "4")))
+# When the sampled grid stops changing, sample slower instead of burning CPU on
+# identical frames (the colour pipeline is skipped between checks).
+IDLE_FPS = float(_env("IDLE_FPS", "4"))
+IDLE_AFTER = int(_env("IDLE_AFTER", "3"))
+
+# "xy" = send chromaticity directly (most precise). "rgb" = legacy rgb_color.
+SEND_MODE = _env("SEND_MODE", "xy")
+
+SEND_BRIGHTNESS = _env("SEND_BRIGHTNESS", "1") == "1"
+# What "screen brightness" means, and therefore how much the colour moves it:
+#   luminance = true light output (Y). Pure red is only 21% of white's Y and pure
+#               blue 7%, so saturated frames come out much dimmer - physically
+#               correct, but it reads as "brightness changes with colour".
+#   lstar     = CIELAB L*, the perceptual lightness of that same light: white
+#               100, red 53, blue 32. Much flatter across hues.
+#   value     = brightest channel (HSV V). Colour has no effect at all; white,
+#               red and blue at 255 all get full brightness.
+# The bulb adds its own small effect: at equal HA brightness a deeply saturated
+# colour emits less luminous flux, so `value` is the only mode that keeps
+# apparent room brightness constant across hues.
+BRIGHTNESS_FROM = _env("BRIGHTNESS_FROM", "lstar")   # luminance | lstar | value
+BRIGHTNESS_GAMMA = float(_env("BRIGHTNESS_GAMMA", "0.8"))
+
+# What "the colour of the screen" means.
+#   mean     = linear average of the whole region (faithful to radiance)
+#   dominant = the most prominent COLOURED cluster, white/neutral cells ignored
+COLOR_ALGO = _env("COLOR_ALGO", "dominant")        # mean | dominant
+DOMINANT_MIX = float(_env("DOMINANT_MIX", "0.5"))   # 0 = mean, 1 = pure dominant
+# Which brightness the light gets in dominant mode:
+#   cluster = the dominant object's own luminance (a bright photo on a dark page
+#             lights the room properly: measured 114 -> 191 on the same frame)
+#   region  = the whole region's mean luminance (the old behaviour)
+DOMINANT_LUMINANCE = _env("DOMINANT_LUMINANCE", "cluster")   # cluster | region
+CHROMA_FLOOR = float(_env("CHROMA_FLOOR", "0.010"))  # du'v' below this = neutral
+HUE_BINS = int(_env("HUE_BINS", "24"))
+
+# A bright frame averages toward its white content, and a bright lamp looks
+# washed out next to a bright screen, so chroma is pushed away from white as
+# luminance rises: k = 1 + GAIN * lum^CURVE, capped at MAX, radially in CIE
+# 1976 u'v' and binary-searched back into sRGB (no clipping, no hue shift).
+SATURATION_BOOST = _env("SATURATION_BOOST", "0") == "1"   # off by default = measured colour, unboosted
+SATURATION_GAIN = float(_env("SATURATION_GAIN", "0.8"))
+SATURATION_CURVE = float(_env("SATURATION_CURVE", "0.6"))
+SATURATION_MAX = float(_env("SATURATION_MAX", "2.2"))
+
+# Perceptual dedupe: skip frames the eye cannot tell apart.
+MIN_DELTA_E = float(_env("MIN_DELTA_E", "1.0"))
+MIN_BRIGHTNESS_DELTA = int(_env("MIN_BRIGHTNESS_DELTA", "4"))
+# A failed command is NOT retried: the next slot ships whatever is on screen
+# then. This only re-sends if a light never confirmed the current colour for
+# this long (a lost command behind a frozen screen).
+RESEND_AFTER = float(_env("RESEND_AFTER", "3.0"))
+
+DRY_RUN = _env("DRY_RUN", "0") == "1"   # log payloads, never touch the lights
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("spotlight-sync")
+
+# D65 reference white
+WN = (0.95047, 1.00000, 1.08883)
+D65_XY = (0.3127, 0.3290)
+
+# --------------------------------------------------------------- targets ----
+class Target:
+    """One light: which zones feed it, plus its own dedupe/telemetry state."""
+
+    __slots__ = ("entity_id", "zones", "last_attempted", "last_sent",
+                 "last_success_mono", "posts", "busy", "errors", "zone_label")
+
+    def __init__(self, entity_id: str, zones: frozenset[int]):
+        self.entity_id = entity_id
+        self.zones = zones
+        self.last_attempted = None
+        self.last_sent = None
+        self.last_success_mono = 0.0
+        self.posts = 0
+        self.busy = 0
+        self.errors = 0
+        self.zone_label = ",".join(str(z) for z in sorted(zones))
+
+    def as_dict(self, colour=None) -> dict:
+        return {
+            "entity": self.entity_id,
+            "zones": sorted(self.zones),
+            "posts": self.posts,
+            "busy": self.busy,
+            "errors": self.errors,
+            "last_sent": {"rgb": list(self.last_sent[0]), "brightness": self.last_sent[1]}
+            if self.last_sent else None,
+            "colour": colour,
+        }
+
+
+def parse_zones(text: str) -> frozenset[int]:
+    text = (text or "").strip().lower()
+    if text in ("", "all", "*", "1-9"):
+        return frozenset(range(1, 10))
+    zones: set[int] = set()
+    for part in text.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            low, high = part.split("-", 1)
+            zones.update(range(int(low), int(high) + 1))
+        else:
+            zones.add(int(part))
+    bad = sorted(z for z in zones if not 1 <= z <= 9)
+    if bad:
+        raise ValueError(f"zones out of range 1-9: {bad}")
+    return frozenset(zones)
+
+
+def parse_light_map(spec: str) -> list[Target]:
+    spec = (spec or "").strip()
+    if not spec:
+        return [Target(LIGHT_ENTITY_ID, frozenset(range(1, 10)))]
+    targets: list[Target] = []
+    for chunk in spec.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        entity, _, zones = chunk.partition("=")
+        entity = entity.strip()
+        if not entity.startswith("light."):
+            raise ValueError(f"LIGHT_MAP entry is not a light entity_id: {chunk!r}")
+        targets.append(Target(entity, parse_zones(zones)))
+    if not targets:
+        raise ValueError("LIGHT_MAP is empty after parsing")
+    return targets
+
+
+def _build_zone_index(width: int, height: int):
+    """(row_idx, col_idx) per zone, 1..9 in reading order, third splits exact."""
+    rows = np.array_split(np.arange(height), 3)
+    cols = np.array_split(np.arange(width), 3)
+    return [(r, c) for r in rows for c in cols]
+
+
+ZONE_INDEX = _build_zone_index(*GRID_SIZE)
+
+
+# --------------------------------------------------------------- settings ----
+# Everything the web UI can change. `env` is only the fallback default; config.json
+# (next to this file, or $CONFIG_FILE) wins, so the UI is authoritative once you
+# save something.
+CONFIG_PATH = Path(os.getenv("CONFIG_FILE") or Path(__file__).with_name("config.json"))
+UI_DIR = Path(__file__).with_name("static")
+GEOMETRY_REV = 0            # bumped when the light/zone map changes at runtime
+
+
+def _spec(name, kind, default, group, label, help_text="", **kw):
+    return {"name": name, "type": kind, "default": default, "group": group,
+            "label": label, "help": help_text, **kw}
+
+
+SETTINGS = [
+    _spec("COLOR_ALGO", "enum", "dominant", "Colour", "Colour model",
+          "mean = linear average of the zones. dominant = the most prominent coloured "
+          "cluster, neutral/white cells ignored.", values=["mean", "dominant"]),
+    _spec("DOMINANT_MIX", "float", 0.5, "Colour", "Dominant mix",
+          "0 = pure average, 1 = pure dominant colour. Blended in u'v' (perceptually uniform).",
+          min=0.0, max=1.0, step=0.05),
+    _spec("DOMINANT_LUMINANCE", "enum", "cluster", "Colour", "Dominant brightness",
+          "cluster = the dominant object's own luminance; region = the zone's mean. "
+          "Only matters when dominant mix > 0.", values=["cluster", "region"]),
+    _spec("CHROMA_FLOOR", "float", 0.010, "Colour", "Neutral threshold",
+          "du'v' below this counts as neutral when picking the dominant colour.",
+          min=0.001, max=0.05, step=0.001),
+    _spec("HUE_BINS", "int", 24, "Colour", "Hue bins",
+          "Resolution of the dominant-hue histogram.", min=6, max=72),
+    _spec("SATURATION_BOOST", "bool", False, "Colour", "Saturation boost",
+          "Push chroma away from white as the frame gets brighter. Off sends the "
+          "measured colour untouched."),
+    _spec("SATURATION_GAIN", "float", 0.8, "Colour", "Boost strength",
+          "k = 1 + gain * luminance^curve, capped at max. Only used when boost is on.",
+          min=0.0, max=2.0, step=0.05),
+    _spec("SATURATION_CURVE", "float", 0.6, "Colour", "Boost curve",
+          "Lower = the boost kicks in at darker frames.", min=0.2, max=2.0, step=0.05),
+    _spec("SATURATION_MAX", "float", 2.2, "Colour", "Boost cap",
+          "Upper bound for k. Gamut clamping applies on top.", min=1.0, max=4.0, step=0.1),
+    _spec("SEND_MODE", "enum", "xy", "Colour", "Payload colour space",
+          "xy = chromaticity (precise, recommended). rgb = legacy rgb_color.",
+          values=["xy", "rgb"]),
+
+    _spec("SEND_BRIGHTNESS", "bool", True, "Brightness", "Send brightness",
+          "Turn brightness updates off to leave the lamp's level alone."),
+    _spec("BRIGHTNESS_FROM", "enum", "lstar", "Brightness", "Brightness source",
+          "luminance = physical light, lstar = perceptual CIELAB, value = brightest channel "
+          "(hue has no effect).", values=["luminance", "lstar", "value"]),
+    _spec("BRIGHTNESS_GAMMA", "float", 0.8, "Brightness", "Brightness gamma",
+          "Tone curve on the 0-1 input: <1 lifts dim frames, >1 crushes them.",
+          min=0.3, max=2.5, step=0.05),
+
+    _spec("CAPTURE_FPS", "float", 12.0, "Capture", "Capture rate",
+          "Screen samples per second. Sends are paced separately.",
+          min=1.0, max=60.0, step=1.0),
+    _spec("CAPTURE_STRIDE", "int", 4, "Capture", "Pixel stride",
+          "Use every Nth pixel: 1 = lossless and expensive, 4 = 1/16 of the pixels.",
+          min=1, max=16, restart=False),
+    _spec("IDLE_FPS", "float", 4.0, "Capture", "Idle rate",
+          "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.5),
+    _spec("IDLE_AFTER", "int", 3, "Capture", "Idle after",
+          "Identical frames before dropping to the idle rate.", min=0, max=60),
+    _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor index",
+          "mss monitor: 0 = all monitors, 1 = primary. Needs a restart.",
+          min=0, max=8, restart=True),
+
+    _spec("TRANSITION", "string", "auto", "Sending", "Transition",
+          "'auto' matches the ramp to the achieved post interval; a number (seconds) "
+          "pins it; 0 snaps."),
+    _spec("POST_INTERVAL_FLOOR", "float", 0.15, "Sending", "Fastest pacing",
+          "Minimum time between commands. Raise it if the Zigbee controller keeps resetting.",
+          min=0.05, max=1.0, step=0.01),
+    _spec("POST_INTERVAL_CEILING", "float", 0.6, "Sending", "Backoff ceiling",
+          "Pacing is allowed to grow to this when the radio reports BUSY.",
+          min=0.1, max=3.0, step=0.05),
+    _spec("SEND_CONCURRENCY", "bool", True, "Sending", "Concurrent sends",
+          "Issue each cycle's lights at once instead of waiting for each device ack."),
+    _spec("MIN_DELTA_E", "float", 1.0, "Sending", "Colour deadband",
+          "Skip a frame unless the colour moves this far (CIELAB dE76). Higher = fewer commands.",
+          min=0.0, max=10.0, step=0.1),
+    _spec("MIN_BRIGHTNESS_DELTA", "int", 4, "Sending", "Brightness deadband",
+          "Skip a frame unless brightness moves this much (0-255).", min=0, max=64),
+    _spec("RESEND_AFTER", "float", 3.0, "Sending", "Rescue interval",
+          "Re-send an unconfirmed colour after this many seconds if nothing landed.",
+          min=0.0, max=60.0, step=0.5),
+    _spec("REQUEST_TIMEOUT", "float", 3.0, "Sending", "HA request timeout",
+          "Seconds to wait for a command. A ZHA call answers only after the Zigbee exchange.",
+          min=0.5, max=30.0, step=0.5),
+    _spec("RADIO_PAUSE", "float", 2.0, "Sending", "Radio stall hold-off",
+          "How long to stop sending after the coordinator reports a stall.",
+          min=0.0, max=30.0, step=0.5),
+    _spec("FAIL_THRESHOLD", "int", 3, "Sending", "Breaker threshold",
+          "Consecutive host-level failures before pausing sends.", min=1, max=20),
+    _spec("FAIL_COOLDOWN", "float", 10.0, "Sending", "Breaker cooldown",
+          "Seconds to pause when Home Assistant is unreachable.", min=1.0, max=300.0, step=1.0),
+    _spec("DRY_RUN", "bool", False, "Sending", "Dry run",
+          "Log payloads instead of sending them."),
+    _spec("LIGHT_MAP", "string", "", "Lights", "Light map",
+          "entity=zones; entity=zones - zones are 1-9 in reading order, or 'all'."),
+]
+SETTINGS_BY_NAME = {s["name"]: s for s in SETTINGS}
+
+
+def _coerce(spec, value):
+    kind = spec["type"]
+    if kind == "enum":
+        if value not in spec["values"]:
+            raise ValueError("must be one of " + ", ".join(spec["values"]))
+        return value
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    if kind == "int":
+        out = int(round(float(value)))
+    elif kind == "float":
+        out = float(value)
+    else:
+        out = "" if value is None else str(value)
+    if kind in ("int", "float"):
+        if "min" in spec:
+            out = max(spec["min"], out)
+        if "max" in spec:
+            out = min(spec["max"], out)
+    return out
+
+
+def settings_snapshot() -> dict:
+    return {s["name"]: globals().get(s["name"], s["default"]) for s in SETTINGS}
+
+
+def persist_config(path: Path | None = None) -> bool:
+    path = path or CONFIG_PATH
+    try:
+        path.write_text(json.dumps(settings_snapshot(), indent=2) + "\n")
+        return True
+    except OSError as exc:
+        log.warning("could not write %s: %s", path, exc)
+        return False
+
+
+def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]]:
+    """Validate, apply at runtime and (optionally) persist. Never partial-applies."""
+    global TARGETS, GEOMETRY_REV
+    if not isinstance(payload, dict):
+        return {}, ["payload must be an object"]
+    new: dict = {}
+    errors: list[str] = []
+    for name, raw in payload.items():
+        spec = SETTINGS_BY_NAME.get(name)
+        if spec is None:
+            errors.append(f"{name}: not a setting")
+            continue
+        try:
+            new[name] = _coerce(spec, raw)
+        except (TypeError, ValueError) as exc:
+            errors.append(f"{name}: {exc}")
+    if "LIGHT_MAP" in new:
+        try:
+            parse_light_map(new["LIGHT_MAP"])
+        except ValueError as exc:
+            errors.append(f"LIGHT_MAP: {exc}")
+            new.pop("LIGHT_MAP")
+    if errors:
+        return {}, errors
+
+    for name, value in new.items():
+        globals()[name] = value
+    if "LIGHT_MAP" in new:
+        TARGETS = parse_light_map(new["LIGHT_MAP"])
+        GEOMETRY_REV += 1
+    if persist:
+        persist_config()
+    return new, []
+
+
+def load_config_file(path: Path | None = None) -> None:
+    path = path or CONFIG_PATH
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        log.error("ignoring %s: %s", path, exc)
+        return
+    applied, errors = apply_settings(data, persist=False)
+    if errors:
+        log.error("config problems in %s: %s", path, "; ".join(errors))
+    log.info("loaded %d setting(s) from %s", len(applied), path)
+
+
+
+# ------------------------------------------------------------- shared state -
+latest_data = {"raw_grid": [], "regions": {}, "lights": {}}
+stop_event = threading.Event()
+state_lock = threading.Lock()
+
+TARGETS: list[Target] = []
+stats = {"posts": 0, "frames": 0, "dropped": 0, "rtt_ms": None, "interval_ms": None,
+         "transition": None, "errors": 0, "busy": 0, "pace_ms": None,
+         "age_ms": None, "max_age_ms": None, "saturation_k": None,
+         "prep_ms": None, "idle": False, "cycle_ms": None, "crop": None,
+         "timeouts": 0, "radio_stalls": 0}
+_last_error_log = 0.0
+
+session = requests.Session()
+session.headers.update(
+    {"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}
+)
+
+
+# ------------------------------------------------------------- colour math --
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    c = np.asarray(c, dtype=np.float32)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    c = np.clip(np.asarray(c, dtype=np.float32), 0.0, 1.0)
+    out = np.where(c <= 0.0031308, c * 12.92, 1.055 * np.power(c, 1 / 2.4) - 0.055)
+    return np.clip(out, 0.0, 1.0)
+
+
+def _linear_to_xyz(lin) -> tuple[float, float, float]:
+    r, g, b = (float(v) for v in lin)
+    x = 0.4124 * r + 0.3576 * g + 0.1805 * b
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    z = 0.0193 * r + 0.1192 * g + 0.9505 * b
+    return x, y, z
+
+
+def xy_from_linear(lin) -> tuple[float, float]:
+    """Linear sRGB -> CIE 1931 xy (sRGB D65 matrix, not HA's wide-gamut one)."""
+    x, y, z = _linear_to_xyz(lin)
+    total = x + y + z
+    if total <= 1e-9:
+        return D65_XY
+    return x / total, y / total
+
+
+def xy_from_rgb(rgb8) -> tuple[float, float]:
+    return xy_from_linear(_srgb_to_linear(np.asarray(rgb8, dtype=np.float32) / 255.0))
+
+
+def srgb_from_linear(lin) -> list[int]:
+    return [int(round(v * 255)) for v in _linear_to_srgb(np.asarray(lin, dtype=np.float32))]
+
+
+def _linear_rgb_from_xy(xy, level: float = 1.0) -> tuple[float, float, float]:
+    x, y = xy
+    if y <= 1e-6:
+        return 0.0, 0.0, 0.0
+    big_x = x * level / y
+    big_y = level
+    big_z = (1 - x - y) * level / y
+    return (3.2406 * big_x - 1.5372 * big_y - 0.4986 * big_z,
+            -0.9689 * big_x + 1.8758 * big_y + 0.0415 * big_z,
+            0.0557 * big_x - 0.2040 * big_y + 1.0570 * big_z)
+
+
+def srgb_from_xy(xy, level: float = 1.0) -> list[int]:
+    """CIE xy -> sRGB 8-bit via the exact inverse of the sRGB matrix above."""
+    return srgb_from_linear(_linear_rgb_from_xy(xy, level))
+
+
+def _in_srgb_gamut(xy) -> bool:
+    """True when xy can be shown by an sRGB display without a negative channel."""
+    return min(_linear_rgb_from_xy(xy)) >= -1e-4
+
+
+def _xy_to_uv(xy) -> tuple[float, float]:
+    x, y = xy
+    d = -2 * x + 12 * y + 3
+    return 4 * x / d, 9 * y / d
+
+
+def _uv_to_xy(uv) -> tuple[float, float]:
+    u, v = uv
+    d = 6 * u - 16 * v + 12
+    if abs(d) < 1e-9:
+        return D65_XY
+    return 9 * u / d, 4 * v / d
+
+
+def _neo(xy_a, xy_b) -> float:
+    """CIE 1976 u'v' distance - the standard measure of chromaticity error."""
+    u1, v1 = _xy_to_uv(xy_a)
+    u2, v2 = _xy_to_uv(xy_b)
+    return float(np.hypot(u1 - u2, v1 - v2))
+
+
+def _cells_uv(cells_lin: np.ndarray):
+    """Linear RGB cells -> (u', v', chroma distance from white) in uniform space."""
+    r, g, b = cells_lin[:, 0], cells_lin[:, 1], cells_lin[:, 2]
+    big_x = 0.4124 * r + 0.3576 * g + 0.1805 * b
+    big_y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    big_z = 0.0193 * r + 0.1192 * g + 0.9505 * b
+    total = big_x + big_y + big_z
+    ok = total > 1e-6
+    if not ok.any():
+        return None
+    x = big_x[ok] / total[ok]
+    y = big_y[ok] / total[ok]
+    d = -2 * x + 12 * y + 3
+    u = 4 * x / d
+    v = 9 * y / d
+    wu, wv = _xy_to_uv(D65_XY)
+    # `kept` is essential: the masks below are built on this filtered array, so
+    # anything indexing the original cells must go through these indices. Getting
+    # this wrong raised "boolean index did not match indexed array" the moment a
+    # region contained fully black cells (letterboxing, a black window, dark video).
+    return u, v, np.hypot(u - wu, v - wv), np.flatnonzero(ok)
+
+
+def dominant_colour(cells_lin: np.ndarray, fallback) -> tuple[tuple[float, float], np.ndarray | None]:
+    """Chroma-weighted peak-hue cluster: the screen's actual colour, not its wash.
+
+    Returns the chromaticity and the cluster's own mean linear RGB, so brightness
+    can follow the object rather than the whole region.
+    """
+    data = _cells_uv(cells_lin)
+    if data is None:
+        return fallback, None
+    u, v, chroma, kept = data
+    wu, wv = _xy_to_uv(D65_XY)
+    coloured = chroma >= CHROMA_FLOOR
+    if not coloured.any():
+        return fallback, None
+    u, v, chroma = u[coloured], v[coloured], chroma[coloured]
+
+    hue = np.arctan2(v - wv, u - wu)
+    bins = np.floor((hue + np.pi) / (2 * np.pi) * HUE_BINS).astype(int) % HUE_BINS
+    scores = np.bincount(bins, weights=chroma, minlength=HUE_BINS)
+    peak = int(np.argmax(scores))
+    # include the neighbours so a hue straddling a bin edge is not split
+    neighbours = [(peak - 1) % HUE_BINS, peak, (peak + 1) % HUE_BINS]
+    sel = np.isin(bins, neighbours)
+    weights = chroma[sel]
+    if not sel.any() or weights.sum() <= 0:
+        return fallback, None
+    pu = float((u[sel] * weights).sum() / weights.sum())
+    pv = float((v[sel] * weights).sum() / weights.sum())
+    cluster = cells_lin[kept][coloured][sel].mean(axis=0)   # back through the indices
+    return _uv_to_xy((pu, pv)), cluster
+
+
+def saturation_factor(luminance: float) -> float:
+    if not SATURATION_BOOST or SATURATION_GAIN <= 0:
+        return 1.0
+    lum = max(0.0, min(1.0, luminance))
+    return min(SATURATION_MAX, 1.0 + SATURATION_GAIN * (lum ** SATURATION_CURVE))
+
+
+def boost_saturation(xy, luminance: float) -> tuple[tuple[float, float], float]:
+    """Push chromaticity away from D65 along its own hue, clipped to sRGB."""
+    k = saturation_factor(luminance)
+    if k <= 1.0:
+        return xy, 1.0
+    u, v = _xy_to_uv(xy)
+    wu, wv = _xy_to_uv(D65_XY)
+    du, dv = u - wu, v - wv
+    # Below roughly one just-noticeable step of chroma the offset is numerical
+    # noise (and amplifying it would tint a white screen at random).
+    if _neo(xy, D65_XY) < 0.002:
+        return xy, 1.0
+
+    target = _uv_to_xy((wu + k * du, wv + k * dv))
+    if _in_srgb_gamut(target):
+        return target, k
+    lo, hi = 1.0, k
+    best = xy
+    for _ in range(14):
+        mid = (lo + hi) / 2.0
+        cand = _uv_to_xy((wu + mid * du, wv + mid * dv))
+        if _in_srgb_gamut(cand):
+            best, lo = cand, mid
+        else:
+            hi = mid
+    return best, max(1.0, lo)
+
+
+def lab_from_srgb(rgb8) -> tuple[float, float, float]:
+    x, y, z = _linear_to_xyz(_srgb_to_linear(np.asarray(rgb8, dtype=np.float32) / 255.0))
+
+    def f(t: float) -> float:
+        return t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
+
+    fx, fy, fz = f(x / WN[0]), f(y / WN[1]), f(z / WN[2])
+    return 116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)
+
+
+def delta_e(rgb_a, rgb_b) -> float:
+    la, aa, ba = lab_from_srgb(rgb_a)
+    lb, ab, bb = lab_from_srgb(rgb_b)
+    return float(np.sqrt((la - lb) ** 2 + (aa - ab) ** 2 + (ba - bb) ** 2))
+
+
+def aggregate(cells_lin: np.ndarray) -> dict:
+    """One region's (or one light's zones') colour, averaged in linear light."""
+    mean_lin = cells_lin.reshape(-1, 3).mean(axis=0)
+    x, y = xy_from_linear(mean_lin)
+    out = {
+        "rgb": srgb_from_linear(mean_lin),
+        "xy": [round(x, 4), round(y, 4)],
+        "luminance": round(float(_linear_to_xyz(mean_lin)[1]), 4),
+    }
+    if COLOR_ALGO == "dominant":
+        (dx, dy), cluster_lin = dominant_colour(cells_lin.reshape(-1, 3), (x, y))
+        if DOMINANT_MIX < 1.0:
+            mu, mv = _xy_to_uv((x, y))
+            du, dv = _xy_to_uv((dx, dy))
+            blend = min(1.0, max(0.0, DOMINANT_MIX))
+            dx, dy = _uv_to_xy((mu + blend * (du - mu), mv + blend * (dv - mv)))
+        out["dominant"] = [round(dx, 4), round(dy, 4)]
+        # The brightness/dedupe decision has to look at the colour we actually
+        # send, not the region mean, or the two disagree (a vivid block on a dark
+        # page kept the lamp dim, and hue changes could pass the dE test).
+        level = out["luminance"]
+        if DOMINANT_LUMINANCE == "cluster" and cluster_lin is not None:
+            cluster_y = float(_linear_to_xyz(cluster_lin)[1])
+            if DOMINANT_MIX < 1.0:          # blend the brightness with the mix too
+                blend = min(1.0, max(0.0, DOMINANT_MIX))
+                cluster_y = level + blend * (cluster_y - level)
+            out["dominant_luminance"] = round(cluster_y, 4)
+            level = cluster_y
+        out["rgb_dominant"] = srgb_from_xy((dx, dy), max(level, 1e-4))
+    return out
+
+
+def zones_cells(lin: np.ndarray) -> list[np.ndarray]:
+    return [lin[r][:, c] for r, c in ZONE_INDEX]
+
+
+def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> np.ndarray:
+    if len(target.zones) == 9:
+        return lin
+    return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
+
+
+def brightness_for_luminance(lum: float) -> int:
+    """Relative luminance 0..1 -> 1-255 brightness (0 = off in HA, so floor at 1)."""
+    return int(round(max(1.0, min(255.0, 255.0 * max(0.0, lum) ** BRIGHTNESS_GAMMA))))
+
+
+def lstar_from_luminance(y: float) -> float:
+    """Relative luminance -> CIELAB L* (0-100): perceptual, not photometric."""
+    t = max(0.0, min(1.0, y))
+    f = t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
+    return 116.0 * f - 16.0
+
+
+def brightness_channel(colour: dict) -> float:
+    """The 0..1 quantity that BRIGHTNESS_GAMMA is applied to."""
+    if BRIGHTNESS_FROM == "value":
+        return max(colour["rgb"]) / 255.0
+    if BRIGHTNESS_FROM == "lstar":
+        return lstar_from_luminance(colour["luminance"]) / 100.0
+    return colour["luminance"]
+
+
+def brightness_for_colour(colour: dict) -> int:
+    return brightness_for_luminance(brightness_channel(colour))
+
+
+def should_send(target: Target, colour: dict, brightness: int) -> bool:
+    """Decide from the screen, never from a retry queue."""
+    last = target.last_attempted
+    if last is None:
+        return True
+    d_e = delta_e(colour["rgb"], last[0])
+    if d_e >= MIN_DELTA_E or abs(brightness - last[1]) >= MIN_BRIGHTNESS_DELTA:
+        return True
+    confirmed = target.last_sent
+    unconfirmed = confirmed is None or delta_e(colour["rgb"], confirmed[0]) >= MIN_DELTA_E
+    return unconfirmed and time.perf_counter() - target.last_success_mono >= RESEND_AFTER
+
+
+def current_transition() -> float:
+    if TRANSITION != "auto":
+        return max(0.0, float(TRANSITION))
+    interval = stats["interval_ms"]
+    if interval is None:
+        return MIN_TRANSITION
+    return max(MIN_TRANSITION, min(MAX_TRANSITION, interval / 1000.0 * 1.15))
+
+
+def build_payload(colour: dict) -> dict:
+    """Service data for one light (no entity_id, so identical ones can merge)."""
+    payload: dict = {}
+    xy, k = boost_saturation(tuple(colour["xy"]), colour["luminance"])
+    stats["saturation_k"] = round(k, 2)
+    if SEND_MODE == "rgb":
+        rgb = srgb_from_xy(xy, max(colour["luminance"], 1e-4))
+        peak = max(max(rgb), 1)          # HA reads chromaticity from rgb_color
+        payload["rgb_color"] = [int(round(c * 255.0 / peak)) for c in rgb]
+    else:
+        payload["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
+    if SEND_BRIGHTNESS:
+        payload["brightness"] = brightness_for_colour(colour)
+    transition = current_transition()
+    if transition > 0:
+        payload["transition"] = round(transition, 2)
+    return payload
+
+
+# ------------------------------------------------------------- send thread --
+class Mailbox:
+    """Single slot, newest wins: the sender never processes a stale frame."""
+
+    def __init__(self) -> None:
+        self._cv = threading.Condition()
+        self._item = None
+        self._closed = False
+
+    def put(self, item) -> bool:
+        with self._cv:
+            if self._closed:
+                return False
+            dropped = self._item is not None
+            self._item = item
+            self._cv.notify()
+            return dropped
+
+    def get(self, timeout: float = 0.5):
+        with self._cv:
+            if self._item is None:
+                self._cv.wait(timeout)
+            item, self._item = self._item, None
+            return item
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+
+
+mailbox = Mailbox()
+
+
+_local = threading.local()
+
+
+def _session_local() -> requests.Session:
+    """One keep-alive session per thread: requests.Session is not thread-safe."""
+    sess = getattr(_local, "session", None)
+    if sess is None:
+        sess = requests.Session()
+        sess.headers.update({"Authorization": f"Bearer {HA_TOKEN}",
+                             "Content-Type": "application/json"})
+        _local.session = sess
+    return sess
+
+
+def _post(body: dict, timeout: float | None = None) -> requests.Response:
+    return _session_local().post(f"{HA_URL}/api/services/light/turn_on", json=body,
+                                 timeout=REQUEST_TIMEOUT if timeout is None else timeout)
+
+
+def _safe_post(body: dict) -> tuple[str, object]:
+    try:
+        return "ok", _post(body)
+    except requests.RequestException as exc:
+        return "exc", exc
+
+
+def post_concurrently(bodies: list[dict]) -> list[tuple[str, object]]:
+    """Issue every light's command at once instead of waiting for each device ack.
+
+    ZHA answers the HTTP call only after the Zigbee device replies (~114 ms for a
+    single spotlight vs ~30 ms for the group), so a serial loop made each cycle
+    the SUM of the lights' acks. On a ZHA mesh with three lights, 351 ms -> 214 ms
+    per cycle.
+    """
+    results: list = [None] * len(bodies)
+
+    def run(index: int, body: dict) -> None:
+        results[index] = _safe_post(body)
+
+    threads = [threading.Thread(target=run, args=(i, b), name=f"post{i}", daemon=True)
+               for i, b in enumerate(bodies)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    return [r if r is not None else ("exc", requests.RequestException("send timeout")) for r in results]
+
+
+
+
+def group_payloads(payloads: dict[str, dict]) -> list[tuple[dict, list[str]]]:
+    """Lights with identical service data share one API call."""
+    groups: dict[tuple, list[str]] = defaultdict(list)
+    for entity, payload in payloads.items():
+        key = (tuple(payload.get("xy_color") or ()), tuple(payload.get("rgb_color") or ()),
+               payload.get("brightness"), payload.get("transition"))
+        groups[key].append(entity)
+    out = []
+    for _key, entities in groups.items():
+        body = dict(payloads[entities[0]])          # identical by construction
+        body["entity_id"] = entities[0] if len(entities) == 1 else list(entities)
+        out.append((body, entities))
+    return out
+
+
+def sender_loop() -> None:
+    """Post the newest colours at the rate the Zigbee radio can actually take."""
+    global _last_error_log
+
+    pace = FIXED_POST_INTERVAL if FIXED_POST_INTERVAL > 0 else max(
+        POST_INTERVAL_FLOOR, 1.0 / CAPTURE_FPS)
+    next_slot = 0.0
+    hold_until = 0.0
+    streak = 0
+    fail_streak = 0
+    blocked_until = 0.0
+    last_probe = 0.0
+
+    def note_failure() -> None:
+        """Host-level breaker: HA refused the connection or is truly down."""
+        nonlocal fail_streak, blocked_until
+        fail_streak += 1
+        if fail_streak >= FAIL_THRESHOLD and blocked_until <= time.perf_counter():
+            blocked_until = time.perf_counter() + FAIL_COOLDOWN
+            log.warning("Home Assistant unreachable (%d failures), pausing sends for %.0f s",
+                        fail_streak, FAIL_COOLDOWN)
+
+    def note_radio_stall(reason: str) -> None:
+        """Zigbee-side stall: the host is fine, the coordinator is not.
+
+        A read timeout on a light command means ZHA never finished the Zigbee
+        exchange (bellows NCP reset, "ApplicationController is not running",
+        "device did not respond"). HA itself is healthy - the GET probe right
+        afterwards succeeds - so this must NOT trip the host breaker; back off
+        and let the controller come back instead of hammering it.
+        """
+        global _last_error_log
+        nonlocal pace, hold_until
+        stats["radio_stalls"] += 1
+        pace = min(POST_INTERVAL_CEILING, max(pace * 1.3, POST_INTERVAL_FLOOR))
+        hold_until = time.perf_counter() + RADIO_PAUSE
+        now = time.time()
+        if now - _last_error_log > 30:
+            _last_error_log = now
+            log.warning("Zigbee controller stall (%s) - holding off %.1fs",
+                        reason or "no detail", RADIO_PAUSE)
+
+    while not stop_event.is_set():
+        # --- host breaker: hold off, probe cheaply, resume when it answers ---
+        if blocked_until > time.perf_counter():
+            stop_event.wait(min(0.5, blocked_until - time.perf_counter()))
+            if time.perf_counter() - last_probe > 2.0:
+                last_probe = time.perf_counter()
+                try:
+                    recovered = session.get(f"{HA_URL}/api/", timeout=2).ok
+                except requests.RequestException:
+                    recovered = False
+                if recovered:
+                    blocked_until = 0.0
+                    fail_streak = 0
+                    next_slot = 0.0
+                    log.info("Home Assistant reachable again, resuming")
+            continue
+
+        delay = next_slot - time.perf_counter()
+        if delay > 0:
+            stop_event.wait(delay)
+        item = mailbox.get(0.2)
+        if item is None:
+            continue
+
+        payloads: dict[str, dict] = {}
+        ages = []
+        for entity, colour in item.items():
+            ages.append((time.perf_counter() - colour.get("measured_at", time.perf_counter())) * 1000.0)
+            payloads[entity] = build_payload(colour)
+        age_ms = min(ages) if ages else 0.0
+        stats["age_ms"] = round(age_ms, 1) if stats["age_ms"] is None else round(
+            0.8 * stats["age_ms"] + 0.2 * age_ms, 1)
+        stats["max_age_ms"] = round(max(stats["max_age_ms"] or 0.0, age_ms), 1)
+
+        by_entity = {t.entity_id: t for t in TARGETS}
+        groups = group_payloads(payloads)
+        for body, entities in groups:                 # stamp attempts before sending
+            for entity in entities:
+                target = by_entity.get(entity)
+                if target is not None:
+                    target.last_attempted = (tuple(item[entity]["rgb"]), body.get("brightness"))
+
+        if DRY_RUN:
+            for body, entities in groups:
+                log.info("DRY_RUN %s -> %s (age %.0f ms)", entities, body, age_ms)
+                for entity in entities:
+                    target = by_entity.get(entity)
+                    if target is not None:
+                        target.last_sent = target.last_attempted
+                        target.last_success_mono = time.perf_counter()
+            continue
+
+        started = time.perf_counter()
+        if SEND_CONCURRENCY and len(groups) > 1:
+            results = post_concurrently([body for body, _ in groups])
+        else:
+            results = [_safe_post(body) for body, _ in groups]
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        stats["cycle_ms"] = round(elapsed_ms, 1)
+        stats["rtt_ms"] = round(elapsed_ms / max(1, len(groups)), 1)
+
+        for (body, entities), (kind, outcome) in zip(groups, results):
+            if kind == "exc":
+                if isinstance(outcome, (requests.ConnectTimeout, requests.ConnectionError)):
+                    stats["errors"] += 1
+                    streak = 0
+                    for entity in entities:
+                        target = by_entity.get(entity)
+                        if target is not None:
+                            target.errors += 1
+                    note_failure()
+                    now = time.time()
+                    if now - _last_error_log > 30:
+                        _last_error_log = now
+                        log.error("Home Assistant not reachable at %s: %s", HA_URL, outcome)
+                else:
+                    # ReadTimeout & friends: HA answered other requests, so this
+                    # is the radio, not the host.
+                    stats["timeouts"] += 1
+                    streak = 0
+                    for entity in entities:
+                        target = by_entity.get(entity)
+                        if target is not None:
+                            target.errors += 1
+                    note_radio_stall("read timeout after %.0f ms" % (REQUEST_TIMEOUT * 1000))
+                continue
+
+            response = outcome
+            if response.ok:
+                stats["posts"] += 1
+                streak += 1
+                fail_streak = 0
+                stats["transition"] = body.get("transition")
+                now_mono = time.perf_counter()
+                for entity in entities:
+                    target = by_entity.get(entity)
+                    if target is None:
+                        continue
+                    # Track the refresh interval PER LIGHT: with several lights
+                    # in one cycle each one updates every (cycle) seconds, so a
+                    # post-to-post average would make the ramps too short.
+                    if target.last_success_mono > 0:
+                        per_light_ms = (now_mono - target.last_success_mono) * 1000.0
+                        if per_light_ms < 10000:
+                            prev = stats["interval_ms"]
+                            stats["interval_ms"] = round(
+                                per_light_ms if prev is None else 0.7 * prev + 0.3 * per_light_ms, 1)
+                    target.posts += 1
+                    target.last_sent = target.last_attempted
+                    target.last_success_mono = now_mono
+                if streak >= 3 and FIXED_POST_INTERVAL <= 0:
+                    pace = max(max(POST_INTERVAL_FLOOR, 1.0 / CAPTURE_FPS), pace * 0.95)
+            elif is_queue_busy(response.text):
+                # Queue full: the frame was dropped, never re-queued. Pace back
+                # off, but no hold-off - the radio is working, just saturated.
+                stats["busy"] += 1
+                streak = 0
+                for entity in entities:
+                    target = by_entity.get(entity)
+                    if target is not None:
+                        target.busy += 1
+                pace = min(POST_INTERVAL_CEILING, pace * 1.3)
+                now = time.time()
+                if now - _last_error_log > 30:
+                    _last_error_log = now
+                    log.warning("Zigbee queue busy (%.0f ms pace), backing off", pace * 1000)
+            elif is_radio_stall(response.text):
+                # Coordinator restarting/unreachable: hold off rather than push.
+                streak = 0
+                for entity in entities:
+                    target = by_entity.get(entity)
+                    if target is not None:
+                        target.busy += 1
+                note_radio_stall(response.text.strip()[:120])
+            else:
+                stats["errors"] += 1
+                streak = 0
+                for entity in entities:
+                    target = by_entity.get(entity)
+                    if target is not None:
+                        target.errors += 1
+                note_failure()
+                now = time.time()
+                if now - _last_error_log > 30:
+                    _last_error_log = now
+                    log.error("HA API %s: %s", response.status_code, response.text[:300])
+
+        stats["pace_ms"] = round(pace * 1000.0, 1)
+        # Pace start-to-start (a slow round-trip eats the slot) and honour any
+        # hold-off a radio stall asked for.
+        next_slot = max(started + pace, hold_until)
+
+
+def send_to_ha(batch: dict[str, dict]) -> None:
+    """Hand a batch of {entity: colour} to the sender."""
+    if mailbox.put(batch):
+        stats["dropped"] += 1
+
+
+def restore_light(restore: dict, attempts: int = 3) -> bool:
+    """Put a light back the way we found it, retrying a dropped Zigbee command."""
+    if len(restore) <= 1:
+        return True
+    restore = {**restore, "transition": 0}   # a ramp makes the group drop mode changes
+    for _ in range(attempts):
+        _post(restore)
+        time.sleep(0.6)
+        try:
+            attrs = session.get(f"{HA_URL}/api/states/{restore['entity_id']}", timeout=5).json().get("attributes", {})
+        except requests.RequestException:
+            continue
+        if "xy_color" in restore:
+            if attrs.get("color_mode") == "xy":
+                return True
+        elif attrs.get("color_mode") == "color_temp":
+            return True
+    log.warning("Light may not have been fully restored to %s", restore)
+    return False
+
+
+def check_ha() -> bool:
+    if not HA_TOKEN:
+        log.error("HA_TOKEN is empty - create one in HA: profile -> Security -> Long-lived access tokens")
+        return False
+    try:
+        response = session.get(f"{HA_URL}/api/", timeout=5)
+    except requests.RequestException as exc:
+        log.error("Could not reach Home Assistant at %s: %s", HA_URL, exc)
+        return False
+    if response.status_code != 200:
+        log.error("HA auth failed (%s) - token invalid or expired", response.status_code)
+        return False
+    log.info("Connected to Home Assistant at %s", HA_URL)
+    return True
+
+
+# --------------------------------------------------------------- calibrate --
+CALIBRATION_SET = [
+    [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255], [255, 0, 255],
+    [255, 128, 0], [200, 60, 40], [120, 140, 200], [64, 96, 64], [255, 255, 255], [90, 90, 110],
+]
+
+
+def calibrate() -> int:
+    """Push test colours to one light, measure the chromaticity it reports back."""
+    if not DRY_RUN and not check_ha():
+        return 1
+    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
+    before = {}
+    try:
+        before = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json()
+    except requests.RequestException as exc:
+        log.error("Could not read current light state: %s", exc)
+        return 1
+
+    attrs = before.get("attributes", {})
+    restore = {"entity_id": entity}
+    if attrs.get("color_mode") == "xy" and attrs.get("xy_color"):
+        restore["xy_color"] = attrs["xy_color"]
+    elif attrs.get("color_temp_kelvin"):
+        restore["color_temp_kelvin"] = attrs["color_temp_kelvin"]
+    if attrs.get("brightness"):
+        restore["brightness"] = attrs["brightness"]
+
+    worst_uv, worst_e = 0.0, 0.0
+    print(f"calibrating {entity} (zones {TARGETS[0].zone_label if TARGETS else 'all'})")
+    try:
+        for target_rgb in CALIBRATION_SET:
+            xy = xy_from_rgb(target_rgb)
+            body = {"entity_id": entity, "xy_color": [round(xy[0], 4), round(xy[1], 4)],
+                    "brightness": 128, "transition": 0}
+            if DRY_RUN:
+                print(f"DRY_RUN would send {target_rgb} -> xy {body['xy_color']}")
+                continue
+            _post(body)
+            time.sleep(0.5)
+            got = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json().get("attributes", {})
+            got_xy = got.get("xy_color") or []
+            if len(got_xy) != 2:
+                print(f"{target_rgb}: no xy reported (mode={got.get('color_mode')})")
+                continue
+            d_uv = _neo(xy, got_xy)
+            # Equal-lightness comparison: HA's rgb_color attribute is its own
+            # wide-gamut, clipping reconstruction, not what the lamp emits.
+            y_target = float(_linear_to_xyz(_srgb_to_linear(np.asarray(target_rgb, dtype=np.float32) / 255.0))[1])
+            comparable = srgb_from_xy(got_xy, max(y_target, 1e-4))
+            d_e = delta_e(target_rgb, comparable)
+            worst_uv, worst_e = max(worst_uv, d_uv), max(worst_e, d_e)
+            print(f"target {str(target_rgb):>18} -> xy {[round(v, 3) for v in got_xy]}  d_uv'={d_uv:.4f}  dE76={d_e:5.1f}")
+    finally:
+        if not DRY_RUN and restore_light(restore):
+            log.info("Light restored to %s", {k: v for k, v in restore.items() if k != "entity_id"})
+
+    print(f"\nworst chromaticity error: du'v'={worst_uv:.4f} "
+          f"({'visible' if worst_uv > 0.003 else 'imperceptible'}, 0.003 ~= 1 step)")
+    print(f"worst colour error at equal lightness: dE76={worst_e:.1f} "
+          f"({'visible' if worst_e > 2 else 'imperceptible'})")
+    return 0
+
+
+# ---------------------------------------------------------------- capture ---
+def capture_geometry(monitor: dict, targets: list["Target"]) -> tuple[dict, tuple[int, int, int, int], tuple[int, int]]:
+    """Grab only the rectangle the lights actually read.
+
+    Frame cost scales with captured pixels (measured 5.5 ms for 4K, 1.9 ms for a
+    third of it), so if every light sits on part of the screen we stop grabbing
+    the rest. Returns (grab rect, (row0,row1,col0,col1) grid window, cell size).
+    """
+    used = sorted({z for t in targets for z in t.zones})
+    if len(used) == 9:
+        rect = {"left": monitor["left"], "top": monitor["top"],
+                "width": monitor["width"], "height": monitor["height"]}
+        return rect, (0, GRID_SIZE[1] - 1, 0, GRID_SIZE[0] - 1), GRID_SIZE
+
+    rows = np.unique(np.concatenate([ZONE_INDEX[z - 1][0] for z in used]))
+    cols = np.unique(np.concatenate([ZONE_INDEX[z - 1][1] for z in used]))
+    r0, r1 = int(rows[0]), int(rows[-1])
+    c0, c1 = int(cols[0]), int(cols[-1])
+
+    cell_w = monitor["width"] / GRID_SIZE[0]
+    cell_h = monitor["height"] / GRID_SIZE[1]
+    x0, x1 = int(c0 * cell_w), int(round((c1 + 1) * cell_w))
+    y0, y1 = int(r0 * cell_h), int(round((r1 + 1) * cell_h))
+    rect = {"left": monitor["left"] + x0, "top": monitor["top"] + y0,
+            "width": max(1, x1 - x0), "height": max(1, y1 - y0)}
+    return rect, (r0, r1, c0, c1), (c1 - c0 + 1, r1 - r0 + 1)
+
+
+def effective_stride(width: int, height: int) -> int:
+    """Cap the stride so every cell still gets several samples per axis.
+
+    Without this, a small screen (or a window-sized capture) would end up with
+    one point sample per cell, which is not a mean at all.
+    """
+    cell_x = width // GRID_SIZE[0]
+    cell_y = height // GRID_SIZE[1]
+    samples_per_axis = max(1, min(cell_x, cell_y) // 2)
+    return max(1, min(CAPTURE_STRIDE, cell_x, cell_y, samples_per_axis))
+
+
+def grid_from_shot(shot, size: tuple[int, int] | None = None) -> np.ndarray:
+    """Screen capture -> sample grid (default 64x36), as cheaply as possible."""
+    width, height = shot.size
+    size = size or GRID_SIZE
+    step = effective_stride(width, height)
+    if step > 1:
+        try:
+            frame = np.asarray(shot)                      # zero-copy BGRA view
+            sub = np.ascontiguousarray(frame[::step, ::step])
+            small = Image.frombuffer("RGB", (sub.shape[1], sub.shape[0]), sub, "raw", "BGRX", 0, 1)
+            return np.asarray(small.resize(size, Image.Resampling.BOX), dtype=np.uint8)
+        except Exception:                                 # fall back to the safe path
+            pass
+    raw = getattr(shot, "raw", None)
+    if raw is not None:
+        img = Image.frombuffer("RGB", (width, height), raw, "raw", "BGRX", 0, 1)
+    else:
+        img = Image.frombytes("RGB", (width, height), shot.rgb)   # non-mss fakes
+    # BOX = exact area mean per cell (LANCZOS samples a kernel and rings).
+    return np.asarray(img.resize(size, Image.Resampling.BOX), dtype=np.uint8)
+
+
+def capture_loop() -> None:
+    interval = 1.0 / CAPTURE_FPS if CAPTURE_FPS > 0 else 0.5
+    try:
+        grabber = mss()
+    except Exception as exc:                     # no display / permissions
+        log.error("Screen capture unavailable (%s). Run this on the machine with the monitor.", exc)
+        return
+
+    monitors = grabber.monitors
+    index = MONITOR_INDEX if 0 <= MONITOR_INDEX < len(monitors) else 1
+    if index >= len(monitors):
+        log.error("MONITOR_INDEX %s out of range (%s monitors), using 0", MONITOR_INDEX, len(monitors) - 1)
+        index = 0
+    monitor = monitors[index]
+    seen_rev = -1                                 # geometry is built on the first pass
+    grab_rect = grid_zeros = cell_size = None
+    log.info("Capturing monitor %s (%sx%s) as %s grid; %d light(s): %s",
+             index, monitor["width"], monitor["height"], GRID_SIZE, len(TARGETS),
+             ", ".join(f"{t.entity_id}[{t.zone_label}]" for t in TARGETS))
+    # (both are re-read each iteration below so the UI can retune the rate live)
+    prev_grid = None
+    identical = 0
+    last_eval = 0.0
+
+    while not stop_event.is_set():
+        started = time.perf_counter()
+        interval = 1.0 / CAPTURE_FPS if CAPTURE_FPS > 0 else 0.5
+        idle_interval = 1.0 / IDLE_FPS if IDLE_FPS > 0 else interval
+        try:
+            if seen_rev != GEOMETRY_REV:          # first pass, or the zone map changed
+                grab_rect, (row0, row1, col0, col1), cell_size = capture_geometry(monitor, TARGETS)
+                grid_zeros = None
+                if (row0, row1, col0, col1) != (0, GRID_SIZE[1] - 1, 0, GRID_SIZE[0] - 1):
+                    grid_zeros = np.zeros((GRID_SIZE[1], GRID_SIZE[0], 3), dtype=np.uint8)
+                seen_rev = GEOMETRY_REV
+                stats["crop"] = [grab_rect["width"], grab_rect["height"]]
+                if grid_zeros is None:
+                    log.info("capture window: full monitor, %d light(s)", len(TARGETS))
+                else:
+                    log.info("capture window: %sx%s at (%s,%s) for %d light(s)",
+                             grab_rect["width"], grab_rect["height"], grab_rect["left"],
+                             grab_rect["top"], len(TARGETS))
+            shot = grabber.grab(grab_rect)
+            if grid_zeros is None:
+                grid = grid_from_shot(shot)
+            else:                       # paste the used window into a full grid
+                grid = grid_zeros.copy()
+                grid[row0:row1 + 1, col0:col1 + 1] = grid_from_shot(shot, size=cell_size)
+            prep_ms = (time.perf_counter() - started) * 1000.0
+            stats["prep_ms"] = round(prep_ms, 2) if stats["prep_ms"] is None else round(
+                0.8 * stats["prep_ms"] + 0.2 * prep_ms, 2)
+
+            # A frozen screen cannot change any light colour, so stop paying for
+            # the colour work; sample slower, but keep evaluating at 2 Hz so the
+            # RESEND_AFTER rescue still fires when a command was lost.
+            unchanged = prev_grid is not None and np.array_equal(grid, prev_grid)
+            prev_grid = grid
+            identical = identical + 1 if unchanged else 0
+            stats["idle"] = identical >= IDLE_AFTER
+
+            if stats["idle"] and time.perf_counter() - last_eval < 0.5:
+                stop_event.wait(max(0.0, idle_interval - (time.perf_counter() - started)))
+                continue
+
+            lin = _srgb_to_linear(grid.astype(np.float32) / 255.0)
+            measured_at = time.perf_counter()
+            zone_cells = zones_cells(lin)
+
+            regions = {
+                "zones": [aggregate(c) for c in zone_cells],
+                "full": aggregate(lin),
+            }
+            batch: dict[str, dict] = {}
+            light_report: dict[str, dict] = {}
+            for target in TARGETS:
+                colour = aggregate(cells_for(target, lin, zone_cells))
+                if COLOR_ALGO == "dominant" and "dominant" in colour:
+                    colour["xy"] = colour["dominant"]
+                    colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
+                    colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
+                colour["measured_at"] = measured_at
+                light_report[target.entity_id] = colour
+                if should_send(target, colour, brightness_for_colour(colour)):
+                    batch[target.entity_id] = colour
+
+            with state_lock:
+                latest_data["raw_grid"] = grid        # serialised on request only
+                latest_data["regions"] = regions
+                latest_data["lights"] = light_report
+
+            last_eval = time.perf_counter()
+            stats["frames"] += 1
+            if batch:
+                send_to_ha(batch)
+        except Exception as exc:                 # never let one bad frame kill the thread
+            log.error("Frame error: %s", exc)
+
+        stop_event.wait(max(0.0, (idle_interval if stats["idle"] else interval)
+                            - (time.perf_counter() - started)))
+
+    grabber.close()
+    log.info("Capture loop stopped")
+
+
+# ------------------------------------------------------------------- web ----
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global TARGETS
+    load_config_file()
+    TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
+    check_ha()
+    stop_event.clear()
+    worker = threading.Thread(target=capture_loop, name="capture", daemon=True)
+    poster = threading.Thread(target=sender_loop, name="sender", daemon=True)
+    worker.start()
+    poster.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        mailbox.close()
+        worker.join(timeout=3)
+        poster.join(timeout=3)
+
+
+app = FastAPI(title="Screen to Lights", lifespan=lifespan)
+
+
+@app.get("/raw_grid")
+def get_raw_grid():
+    with state_lock:
+        grid = latest_data["raw_grid"]
+    cells = grid.tolist() if hasattr(grid, "tolist") else grid
+    return {"grid": cells, "size": list(GRID_SIZE)}
+
+
+@app.get("/regions")
+def get_regions():
+    with state_lock:
+        return {"zones": latest_data["regions"].get("zones", []),
+                "full": latest_data["regions"].get("full")}
+
+
+@app.get("/health")
+def health():
+    return {
+        "ha_url": HA_URL,
+        "fps": CAPTURE_FPS,
+        "capture_stride": CAPTURE_STRIDE,
+        "capture_rect": stats["crop"],
+        "send_concurrency": SEND_CONCURRENCY,
+        "dominant_luminance": DOMINANT_LUMINANCE,
+        "idle_fps": IDLE_FPS,
+        "color_algo": COLOR_ALGO,
+        "brightness_from": BRIGHTNESS_FROM,
+        "dominant_mix": DOMINANT_MIX,
+        "saturation_boost": SATURATION_BOOST,
+        "send_mode": SEND_MODE,
+        "dry_run": DRY_RUN,
+        "has_frame": bool(latest_data["raw_grid"]),
+        "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
+        "stats": dict(stats),
+    }
+
+
+@app.get("/")
+def index_page():
+    page = UI_DIR / "index.html"
+    if not page.exists():
+        return JSONResponse({"detail": "UI missing: static/index.html not found"}, status_code=404)
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/api/config")
+def get_config():
+    return {
+        "settings": settings_snapshot(),
+        "meta": SETTINGS,
+        "config_path": str(CONFIG_PATH),
+        "ha_url": HA_URL,
+        "dry_run": DRY_RUN,
+        "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
+        "restart_required": [s["name"] for s in SETTINGS if s.get("restart")],
+    }
+
+
+@app.post("/api/config")
+def post_config(payload: dict = Body(...)):
+    """Save settings. Validated as a whole: nothing is applied on any error."""
+    if payload.get("reset"):
+        applied, errors = apply_settings({s["name"]: s["default"] for s in SETTINGS})
+    else:
+        applied, errors = apply_settings(payload.get("settings", payload))
+    if errors:
+        return JSONResponse({"ok": False, "errors": errors}, status_code=400)
+    return {"ok": True, "applied": applied, "settings": settings_snapshot(),
+            "restart_required": [n for n in applied
+                                 if SETTINGS_BY_NAME.get(n, {}).get("restart")]}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="measure this light's colour accuracy, then restore its state")
+    args = parser.parse_args()
+    if args.calibrate:
+        TARGETS.extend(parse_light_map(LIGHT_MAP))
+        raise SystemExit(calibrate())
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,18 @@
+[Unit]
+Description=Screen colour -> Home Assistant lights
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/screen-to-lights
+Environment=HA_URL=http://192.168.1.10:8123
+Environment=HA_TOKEN=replace-me
+ExecStart=/opt/screen-to-lights/.venv/bin/python screen_to_lights.py
+Restart=on-failure
+RestartSec=5
+# the capture thread needs the session's display/screen access
+# DISPLAY=:0 is only needed on X11; Windows runs it as a normal user process
+
+[Install]
+WantedBy=graphical.target

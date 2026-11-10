@@ -1,12 +1,19 @@
-__pycache__/
-*.pyc
-.venv*/
-venv/
+# local state
 config.json
 secrets.json
-*.log
-.DS_Store
+.venv/
+.venv*/
+venv/
+
+# build output
+build/
+dist/
+*.spec
+packaging/icon.ico
+packaging/version_info.txt
+
+# tooling
+__pycache__/
+*.pyc
 .pytest_cache/
 .ruff_cache/
-
-.venv/

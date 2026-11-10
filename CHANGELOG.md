@@ -1,12 +1,47 @@
 # Changelog
 
-All notable changes to Screen → Lights. Format follows
+All notable changes to Hass Ambilights. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — the version lives in
-`screen_to_lights.py` as `__version__` and is reported by `GET /health`, `GET /api/config`
-and `screen_to_lights.py --version`.
+`hass_ambilights.py` as `__version__` and is reported by `GET /health`, `GET /api/config`
+and `hass_ambilights.py --version`.
 
 ## [Unreleased]
+
+## [2.0.0] — 2026-11-10
+
+Renamed to **Hass Ambilights**, and shipped as a Windows desktop app.
+
+### Changed (breaking)
+- The project, entry file and executable are now **Hass Ambilights**:
+  `screen_to_lights.py` → `hass_ambilights.py`, `ScreenToLights.exe` →
+  `HassAmbilights.exe`, and the settings UI, window title and tray all use the new name.
+- Packaged builds keep config in `%APPDATA%\HassAmbilights` (was `ScreenToLights`).
+  Running the script still keeps `config.json` beside the file, so a script install only
+  needs the new file name.
+
+## [1.1.0] — 2026-11-10
+
+Windows desktop build. The colour pipeline, server and settings page are unchanged; what
+changes is how the app starts and where it lives.
+
+### Added
+- **`--window`** — the settings page in a native window (pywebview/WebView2); closing the
+  window quits. A double-clicked exe runs this by default.
+- **`--tray`** — tray icon with *Open settings* and *Quit*, for running at login.
+- **Start with Windows** — opt-in setting that adds/removes the login entry and applies
+  immediately.
+- **Per-monitor DPI awareness** on Windows, so the captured rectangle and the monitor
+  picker agree with Windows on mixed-DPI desktops.
+- **Single instance** — launching again focuses the running app instead of fighting for
+  the port; a busy port picks the next free one (GUI modes only).
+- **`START_WITH_WINDOWS`** setting, and `?version`-carrying health checks used for the
+  instance probe.
+
+### Changed
+- Packaged builds keep `config.json` and `secrets.json` in `%APPDATA%\HassAmbilights` and
+  a rotating log in `%LOCALAPPDATA%\HassAmbilights\logs`. Running the script still keeps
+  everything beside the file.
 
 ## [1.0.0] — 2026-11-10
 
@@ -36,7 +71,7 @@ First release: one file that mirrors a screen onto Home Assistant lights.
   dispatch, and pacing tuned to what a Zigbee mesh accepts.
 - **`--calibrate`** — twelve measured colours, reports worst du'v' and dE76, restores the
   light afterwards.
-- **One-file install** — running `screen_to_lights.py` creates its own `.venv`, installs
+- **One-file install** — running `hass_ambilights.py` creates its own `.venv`, installs
   its dependencies and serves the UI; the settings page is embedded in the file.
 
 ### Fixed before first release

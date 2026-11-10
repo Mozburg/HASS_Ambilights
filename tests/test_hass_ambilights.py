@@ -1,6 +1,6 @@
-"""Offline verification for screen_to_lights.py: fake screen + mock HA.
+"""Offline verification for hass_ambilights.py: fake screen + mock HA.
 
-Run from anywhere:  python tests/test_spotlight_sync.py
+Run from anywhere:  python tests/test_hass_ambilights.py
 """
 import sys
 from pathlib import Path
@@ -172,13 +172,13 @@ os.environ["MONITOR_INDEX"] = "1"
 
 from PIL import Image
 
-import screen_to_lights as m
+import hass_ambilights as m
 
 # the module must use mss.MSS where available: mss.mss warns on every call
 import mss as _mss_module
 if hasattr(_mss_module, "MSS"):
     assert m.mss is not getattr(_mss_module, "mss", None), \
-        "screen_to_lights still imports the deprecated mss.mss"
+        "hass_ambilights still imports the deprecated mss.mss"
     assert m.mss.__name__ == "MSS", m.mss.__name__
 
 m.mss = lambda: FakeMSS()
@@ -720,6 +720,58 @@ if _changelog.exists():
         assert _ver in readme.read_text(), "README does not mention the current version"
 print(f"versioning ok: {_ver} exposed in /health, /api/config, UI and CHANGELOG")
 
+# --- desktop mode helpers --------------------------------------------------
+_keep_frozen = m.FROZEN
+m.FROZEN = False
+assert m.app_data_dir() == __import__("pathlib").Path(m.__file__).resolve().parent
+assert m.log_file_path() is None, "a script run has a terminal to log to"
+_cmd = m.autostart_command()
+assert "--tray" in _cmd and "hass_ambilights.py" in _cmd, _cmd
+m.FROZEN = True
+import os as _os
+_os.environ["APPDATA"] = "/tmp/qa-appdata"
+_os.environ["LOCALAPPDATA"] = "/tmp/qa-localappdata"
+assert str(m.app_data_dir()).endswith("HassAmbilights"), m.app_data_dir()
+assert str(m.log_file_path()).endswith("app.log"), m.log_file_path()
+assert m.autostart_command().endswith("--tray"), m.autostart_command()
+m.FROZEN = _keep_frozen
+
+_icon = m.tray_icon_image()
+assert _icon.size == (64, 64) and _icon.mode == "RGBA"
+assert m.gui_available() in (True, False)          # must not raise without pywebview
+
+# a busy port must not be chosen, and an unknown server is not "already running"
+import socket as _socket
+_srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+_srv.bind(("127.0.0.1", 0))
+_srv.listen(1)
+_busy = _srv.getsockname()[1]
+try:
+    assert m.first_free_port("127.0.0.1", _busy) != _busy, "picked a port that is in use"
+    assert m.find_instance("127.0.0.1", _busy, limit=1) is None, "claimed a foreign port"
+finally:
+    _srv.close()
+# a --windowed exe has no stdout/stderr; redirect_std_streams must cope and
+# send later writes to the log rather than raising on None
+import subprocess as _subprocess
+_log_path = Path(tempfile.mkdtemp()) / "windowed.log"
+_child = _subprocess.run(
+    [sys.executable, "-c",
+     "import sys; sys.path.insert(0, %r); import hass_ambilights as m; "
+     "sys.stdout = None; sys.stderr = None; m.redirect_std_streams(); "
+     "assert sys.stdout is not None and sys.stderr is not None; "
+     "print('written after redirect')" % str(Path(m.__file__).resolve().parent)],
+    capture_output=True, text=True, timeout=60,
+    env={**__import__("os").environ, "LOG_FILE": str(_log_path)})
+assert _child.returncode == 0, _child.stderr[-400:]
+assert _log_path.exists() and "written after redirect" in _log_path.read_text(), \
+    "a windowed run must write where it can be read"
+
+# a closed port must be retried, not raised, and a dead one must time out
+assert m.wait_for_server("http://127.0.0.1:9/", timeout=0.6) is False
+assert m.port_is_ours("127.0.0.1", 9, timeout=0.4) is False
+print("desktop helpers ok: appdata paths, autostart command, tray icon, port picking")
+
 # --- bad TRANSITION must not reach the sender ------------------------------
 for bad in ("", "   ", "abc"):
     assert m.apply_settings({"TRANSITION": bad})[1], f"TRANSITION {bad!r} should be rejected"
@@ -895,7 +947,7 @@ _ui = m.index_page()
 assert getattr(_ui, "status_code", 200) == 200, "GET / must serve the embedded page"
 _page = _ui.body.decode()
 for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="refreshlights"',
-               'id="lights"', "Screen → Lights", "Test connection",
+               'id="lights"', "Hass Ambilights", "Test connection",
                'className = "adv"', "function refreshVisibility", "row.hidden = !visible"):
     assert needle in _page, needle
 assert "/static/" not in _page, "page must not depend on external assets"

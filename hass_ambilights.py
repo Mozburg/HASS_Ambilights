@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mirror chosen parts of the screen onto any number of Home Assistant lights.
+"""Hass Ambilights - mirror chosen parts of the screen onto Home Assistant lights.
 
 Zones: the screen is split into a 3x3 grid, numbered in reading order
 
@@ -35,7 +35,7 @@ take (a few commands per second on a typical mesh) and backs off on "queue BUSY"
 the lamp transition auto-tracks the achieved interval so ramps chain smoothly.
 
 Install and run (one file, one command):
-    python screen_to_lights.py
+    python hass_ambilights.py
 
 The first run creates .venv beside this file and installs the dependencies, then
 serves the settings UI on http://127.0.0.1:8000 and opens it, where the Home
@@ -43,7 +43,7 @@ Assistant URL, token and lights can be entered. Nothing else needs configuring,
 and an environment that already has the packages is used as-is.
 
 Check accuracy on your hardware (12 test colours, restores the light):
-    python screen_to_lights.py --calibrate
+    python hass_ambilights.py --calibrate
 
 Endpoints: GET /  GET /api/config  GET /health  GET /regions  GET /raw_grid
 """
@@ -52,6 +52,7 @@ Endpoints: GET /  GET /api/config  GET /health  GET /regions  GET /raw_grid
 import argparse
 import json
 import logging
+import logging.handlers
 import math
 import socket
 from typing import Any
@@ -186,7 +187,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -321,6 +322,47 @@ RESEND_AFTER = float(_env("RESEND_AFTER", "3.0"))
 DRY_RUN = _env("DRY_RUN", "0") == "1"   # log payloads, never touch the lights
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def redirect_std_streams() -> None:
+    """A --windowed exe has sys.stdout/stderr set to None.
+
+    Everything that writes to them (print, uvicorn's default log config, a
+    traceback) then fails or goes nowhere, which is how a packaged app ends up
+    "starting" and never serving with no usable log.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    path = log_file_path()
+    stream = None
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stream = open(path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            stream = None
+    if stream is None:
+        stream = open(os.devnull, "a", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
+def setup_file_logging() -> None:
+    """Packaged apps have no console: keep a rotating log we can ask for."""
+    path = log_file_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000,
+                                                       backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log.info("logging to %s", path)
+    except OSError as exc:
+        log.warning("could not open %s: %s", path, exc)
 log = logging.getLogger("spotlight-sync")
 
 # D65 reference white
@@ -412,7 +454,44 @@ ZONE_INDEX = _build_zone_index(*GRID_SIZE)
 # Everything the web UI can change. `env` is only the fallback default; config.json
 # (next to this file, or $CONFIG_FILE) wins, so the UI is authoritative once you
 # save something.
-CONFIG_PATH = Path(os.getenv("CONFIG_FILE") or Path(__file__).with_name("config.json"))
+FROZEN = bool(getattr(sys, "frozen", False))
+
+
+def app_data_dir() -> Path:
+    """Where a packaged app keeps its config; script mode stays beside the file.
+
+    A one-file exe unpacks into a temporary directory, so writing next to
+    __file__ would lose the settings on every launch.
+    """
+    if not FROZEN:
+        return Path(__file__).resolve().parent
+    if os.name == "nt":
+        base = os.getenv("APPDATA") or str(Path.home() / "AppData/Roaming")
+    else:
+        base = os.getenv("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    folder = Path(base) / "HassAmbilights"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return folder
+
+
+def log_file_path() -> Path | None:
+    """A log file when there is no terminal to read (packaged app)."""
+    explicit = os.getenv("LOG_FILE")
+    if explicit:
+        return Path(explicit)
+    if not FROZEN:
+        return None
+    if os.name == "nt":
+        base = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
+    else:
+        base = os.getenv("XDG_STATE_HOME") or str(Path.home() / ".local/state")
+    return Path(base) / "HassAmbilights" / "logs" / "app.log"
+
+
+CONFIG_PATH = Path(os.getenv("CONFIG_FILE") or app_data_dir() / "config.json")
 # The settings page is embedded: this file is the whole application, so copying it
 # somewhere and running it is a complete install. Edit here, not in a separate asset.
 UI_HTML = r"""<!DOCTYPE html>
@@ -421,7 +500,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Ccircle cx='11' cy='11' r='6' fill='%23ff5c5c'/%3E%3Ccircle cx='21' cy='11' r='6' fill='%2344d17a'/%3E%3Ccircle cx='11' cy='21' r='6' fill='%234493f8'/%3E%3Ccircle cx='21' cy='21' r='6' fill='%23ffd226'/%3E%3C/svg%3E">
-<title>Screen → Lights</title>
+<title>Hass Ambilights</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --line:#2b333d;
@@ -530,7 +609,7 @@ UI_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Screen → Lights</h1>
+  <h1>Hass Ambilights</h1>
   <span class="badge" id="dirtybadge" hidden>unsaved changes</span>
   <span class="live">
     <span id="dot" class="dot"></span><span id="conn">connecting…</span>
@@ -1002,7 +1081,7 @@ async function reload() {
   if (ENTITIES === null) await loadEntities(false);   // first paint only
   if (MONITORS === null) await loadMonitors();
   $("version").textContent = data.version ? "v" + data.version : "";
-  $("version").title = "Screen to Lights " + (data.version || "");
+  $("version").title = "Hass Ambilights " + (data.version || "");
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
@@ -1391,6 +1470,9 @@ SETTINGS.extend([
     _spec("BIND_HOST", "string", "127.0.0.1", "Server", "Listen address",
           "Interface for the settings UI. 127.0.0.1 = this machine only; 0.0.0.0 = anyone "
           "who can reach the port, and the UI has no login. Needs a restart.", restart=True),
+    _spec("START_WITH_WINDOWS", "bool", False, "Server", "Start with Windows",
+          "Adds a login entry that starts the app in the tray. Windows only; takes "
+          "effect as soon as you save.",),
     _spec("BIND_PORT", "int", 8000, "Server", "Listen port",
           "TCP port for the settings UI. Needs a restart.", min=1, max=65535, restart=True),
 ])
@@ -1610,6 +1692,11 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
 
     for name, value in new.items():
         globals()[name] = value
+    if "START_WITH_WINDOWS" in new:
+        ok, message = set_autostart(bool(new["START_WITH_WINDOWS"]))
+        AUTOSTART_RESULT.clear()
+        AUTOSTART_RESULT.update({"ok": ok, "detail": message})
+        log.info("autostart: %s", message)
     if token_changed:
         persist_secrets()
     if {"HA_URL", "HA_TOKEN"} & set(new):
@@ -2676,6 +2763,112 @@ def capture_loop() -> None:
     log.info("Capture loop stopped")
 
 
+# --------------------------------------------------------------- windows ----
+AUTOSTART_RESULT: dict = {}
+AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+AUTOSTART_NAME = "HassAmbilights"
+
+
+def autostart_command() -> str:
+    """The command Windows should run at login (frozen exe, else pythonw)."""
+    if FROZEN:
+        return f'"{Path(sys.executable).resolve()}" --tray'
+    script = Path(__file__).resolve()
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    runner = pythonw if pythonw.exists() else Path(sys.executable)
+    return f'"{runner}" "{script}" --tray'
+
+
+def autostart_enabled() -> bool:
+    if os.name != "nt":
+        return False
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
+            value, _ = winreg.QueryValueEx(key, AUTOSTART_NAME)
+        return bool(value)
+    except OSError:
+        return False
+
+
+def set_autostart(enabled: bool) -> tuple[bool, str]:
+    """Register or remove the login entry. Returns (ok, message)."""
+    if os.name != "nt":
+        # harmless elsewhere: the setting is simply inert
+        return False, "start with Windows is only available on Windows"
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_NAME)
+                except FileNotFoundError:
+                    pass
+        return True, "autostart " + ("enabled" if enabled else "disabled")
+    except OSError as exc:
+        return False, f"could not change autostart: {exc}"
+
+
+def make_dpi_aware() -> None:
+    """Per-monitor DPI awareness: without it mss reports scaled coordinates.
+
+    On a mixed-DPI multi-monitor desk the captured rectangle lands on the wrong
+    pixels (or the wrong monitor) unless the process declares awareness before
+    any window or capture exists.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)      # per-monitor v2
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception as exc:                                    # never fatal
+        log.debug("could not set DPI awareness: %s", exc)
+
+
+def port_is_ours(host: str, port: int, timeout: float = 1.0) -> bool:
+    """Is something already serving this app on that port?"""
+    try:
+        response = requests.get(f"http://{host}:{port}/health", timeout=timeout)
+        body = response.json()
+    except (requests.RequestException, ValueError):
+        return False
+    return isinstance(body, dict) and "version" in body and "lights" in body
+
+
+def find_instance(host: str, first: int, limit: int = 12) -> int | None:
+    """Port of an instance that is already running, if any."""
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    for port in range(first, first + limit):
+        if port_is_ours(probe_host, port):
+            return port
+    return None
+
+
+def first_free_port(host: str, first: int, limit: int = 12) -> int:
+    """The preferred port, or the next free one so a stale run cannot block us."""
+    import socket as _socket
+
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    for port in range(first, first + limit):
+        with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as sock:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((probe_host, port))
+            except OSError:
+                continue
+            return port
+    return first
+
+
 # ------------------------------------------------------------------- web ----
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -2702,7 +2895,7 @@ async def lifespan(_app: FastAPI):
         poster.join(timeout=3)
 
 
-app = FastAPI(title="Screen to Lights", lifespan=lifespan)
+app = FastAPI(title="Hass Ambilights", lifespan=lifespan)
 
 
 @app.get("/raw_grid")
@@ -2943,7 +3136,7 @@ def post_config(payload: Any = Body(...)):
         for name, value in applied.items()
     }
     return {"ok": True, "applied": safe_applied, "settings": settings_snapshot(),
-            "persisted": persist, "connection": probe,
+            "persisted": persist, "connection": probe, "autostart": dict(AUTOSTART_RESULT),
             "restart_required": sorted(n for n in changed
                                         if SETTINGS_BY_NAME.get(n, {}).get("restart"))}
 
@@ -2973,14 +3166,117 @@ def post_calibrate():
     return {"ok": True, "started": True, "entity": entity}
 
 
+def gui_available() -> bool:
+    """Is there a native window to open (pywebview and a backend)?"""
+    import importlib.util
+
+    return importlib.util.find_spec("webview") is not None
+
+
+def tray_icon_image():
+    """Four dots on dark, matching the page icon. Pure PIL, so it is testable."""
+    from PIL import Image, ImageDraw
+
+    size = 64
+    img = Image.new("RGBA", (size, size), (13, 17, 23, 255))
+    draw = ImageDraw.Draw(img)
+    colours = [(255, 92, 92), (68, 209, 122), (68, 147, 248), (255, 210, 38)]
+    for i, colour in enumerate(colours):
+        x = 10 + (i % 2) * 30
+        y = 10 + (i // 2) * 30
+        draw.ellipse((x, y, x + 18, y + 18), fill=colour + (255,))
+    return img
+
+
+def start_server(host: str, port: int):
+    """Run uvicorn in a thread so a window can own the main loop."""
+    config = uvicorn.Config(app, host=host, port=port, log_level="warning", log_config=None)
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None      # not the main thread
+    thread = threading.Thread(target=server.run, name="uvicorn", daemon=True)
+    thread.start()
+    return thread, server
+
+
+def wait_for_server(url: str, timeout: float = 15.0) -> bool:
+    """Poll until the port answers - it is closed for the first few hundred ms."""
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        try:
+            if requests.get(url + "health", timeout=1.0).ok:
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(0.15)
+    return False
+
+
+def run_window(url: str) -> int:
+    """The UI in a native window. Closing it ends the app."""
+    try:
+        import webview
+    except ImportError:
+        log.warning("pywebview is not installed - using your browser instead")
+        import webbrowser
+
+        webbrowser.open(url)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            return 0
+    webview.create_window("Hass Ambilights", url, width=1180, height=840,
+                          min_size=(900, 600))
+    webview.start()
+    return 0
+
+
+def run_tray(url: str) -> int:
+    """A tray icon only: open the settings, or quit. Used for autostart."""
+    try:
+        import pystray
+    except ImportError:
+        log.warning("pystray is not installed - serving without a tray icon")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            return 0
+
+    import webbrowser
+
+    icon = None
+
+    def open_settings(_icon=None, _item=None):
+        webbrowser.open(url)
+
+    def quit_app(_icon=None, _item=None):
+        if icon is not None:
+            icon.stop()
+
+    icon = pystray.Icon(
+        "hass_ambilights", tray_icon_image(), "Hass Ambilights",
+        menu=pystray.Menu(pystray.MenuItem("Open settings", open_settings, default=True),
+                          pystray.MenuItem("Quit", quit_app)))
+    icon.run()
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
     parser.add_argument("--version", action="version",
-                        version=f"screen_to_lights {__version__}")
+                        version=f"hass_ambilights {__version__}")
     parser.add_argument("--calibrate", action="store_true",
                         help="measure this light's colour accuracy, then restore its state")
     parser.add_argument("--no-browser", action="store_true",
                         help="do not open the settings page on a run with no token")
+    parser.add_argument("--window", action="store_true",
+                        help="open the settings in a native window (pywebview) and quit "
+                             "when it closes")
+    parser.add_argument("--tray", action="store_true",
+                        help="run in the system tray with Open settings / Quit")
+    parser.add_argument("--server", action="store_true",
+                        help="serve only, no window or tray (services, CI)")
     args = parser.parse_args()
     if args.calibrate:
         load_config_file()
@@ -2989,19 +3285,84 @@ def main() -> None:
         if report["error"]:
             print("calibration failed: " + report["error"], file=sys.stderr)
         raise SystemExit(0 if report["ok"] else 1)
+    if args.server:
+        mode = "server"
+    elif args.tray:
+        mode = "tray"
+    elif args.window or FROZEN:          # a double-clicked exe opens its window
+        mode = "window"
+    else:
+        mode = "server"
+
+    redirect_std_streams()
+    setup_file_logging()
+    make_dpi_aware()                     # before any window or capture exists
+    log.info("Hass Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
+
     ENV_SNAPSHOT.update(settings_snapshot())
     load_secrets()
-    load_config_file()             # BIND_* may come from config.json
-    if not HA_TOKEN and not args.no_browser:
-        # nothing to mirror yet: hand the user the settings page
-        import webbrowser
+    load_config_file()                   # BIND_* may come from config.json
 
-        host = "127.0.0.1" if BIND_HOST in ("0.0.0.0", "::") else BIND_HOST
-        threading.Timer(1.0, webbrowser.open, (f"http://{host}:{BIND_PORT}/",)).start()
+    host = "127.0.0.1" if BIND_HOST in ("0.0.0.0", "::") else BIND_HOST
+
+    existing = find_instance(host, BIND_PORT)
+    if existing is not None:
+        url = f"http://{host}:{existing}/"
+        log.info("Hass Ambilights is already running at %s", url)
+        if mode == "window" and gui_available():
+            run_window(url)
+        else:
+            import webbrowser
+
+            webbrowser.open(url)
+        return
+
+    if mode == "server":
+        port = BIND_PORT
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind((BIND_HOST if BIND_HOST != "::" else "0.0.0.0", port))
+        except OSError as exc:
+            raise SystemExit(
+                f"cannot listen on {BIND_HOST}:{port} ({exc.strerror or exc}).\n"
+                f"Something else is using that port - stop it, or set BIND_PORT "
+                f"(Server card, or BIND_PORT=8001 in the environment).")
+        finally:
+            probe.close()
+    else:
+        port = first_free_port(BIND_HOST, BIND_PORT)
+        if port != BIND_PORT:
+            log.warning("port %s is taken; using %s", BIND_PORT, port)
+
     if BIND_HOST not in ("127.0.0.1", "localhost", "::1"):
         log.warning("settings UI on http://%s:%s — it has no authentication, so anyone "
-                    "who can reach that port can change settings", BIND_HOST, BIND_PORT)
-    uvicorn.run(app, host=BIND_HOST, port=BIND_PORT)
+                    "who can reach that port can change settings", BIND_HOST, port)
+
+    url = f"http://{host}:{port}/"
+    if mode == "server":
+        if not HA_TOKEN and not args.no_browser:
+            # nothing to mirror yet: hand the user the settings page
+            import webbrowser
+
+            threading.Timer(1.0, webbrowser.open, (url,)).start()
+        log.info("serving on http://%s:%s", BIND_HOST, port)
+        uvicorn.run(app, host=BIND_HOST, port=port, log_config=None)
+        return
+
+    log.info("starting the embedded server on %s", url)
+    thread, server = start_server(BIND_HOST, port)
+    if not wait_for_server(url):
+        server.should_exit = True
+        thread.join(timeout=5)
+        raise SystemExit(f"the settings server did not start on {url} - check the log")
+    log.info("serving %s in %s mode", url, mode)
+    try:
+        code = run_window(url) if mode == "window" else run_tray(url)
+    finally:
+        server.should_exit = True
+        stop_event.set()
+        thread.join(timeout=5)
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

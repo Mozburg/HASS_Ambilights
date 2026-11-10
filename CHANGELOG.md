@@ -8,6 +8,15 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.1.1] — 2026-11-10
+
+### Removed
+- The banner announcing that `config.json` overrides environment settings. It fired on
+  normal use (any saved file differs from the environment), named settings the UI cannot
+  change, and its advice — delete the file or reset everything — was worse than the
+  problem. The precedence is documented instead, in the README and in the help for the
+  settings it affects.
+
 ## [2.1.0] — 2026-11-10
 
 ### Added

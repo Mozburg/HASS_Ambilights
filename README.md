@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.1.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.1.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -60,9 +60,9 @@ install. Nothing needs a network round trip except the packages on first run.
 Subsequent runs start in about a second — the install is skipped once `.venv` is
 populated.
 
-Settings saved in the UI go to `config.json` next to the script and are applied live;
-that file outranks the environment, and the UI says so in the footer when it is
-overriding env values. The token is kept out of it, in `secrets.json` (0600).
+Settings saved in the UI go to `config.json` next to the script and are applied live.
+That file outranks the environment — quietly, which is worth knowing if you set a value
+in both places. The token is kept out of it, in `secrets.json` (0600).
 
 Prefer environment variables? They still work, and `config.json` beats them:
 
@@ -180,8 +180,8 @@ light mapping, and trigger a calibration flash. The bundled systemd unit sets
 `BIND_HOST=0.0.0.0` explicitly — comment that line out to keep it local. Put it behind
 your reverse proxy's auth if it needs to be reachable from outside.
 
-`config.json` outranks the environment, `BIND_*` included, and the UI warns in the
-footer when it is overriding env values.
+`config.json` outranks the environment, `BIND_*` included — once the file has a value,
+the environment variable for that setting is ignored.
 
 ## Endpoints
 

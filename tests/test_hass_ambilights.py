@@ -772,6 +772,147 @@ m.DOMINANT_MIX = m.DOMINANT_MIX          # no-op, keeps the phase boundary obvio
 print(f"autotune ok: picked {_report['floor']:.2f}-{_report['ceiling']:.2f} s "
       f"(rejected at {_report['busy_at_ms']} ms), light restored")
 
+# --- any grid, not just 3x3 ------------------------------------------------
+_keep_grid = (m.ZONE_ROWS, m.ZONE_COLS)
+
+
+def _zone_cells(rows, cols):
+    m.ZONE_ROWS, m.ZONE_COLS = rows, cols
+    count = m.rebuild_zone_index()
+    blocks = m.ZONE_INDEX
+    assert len(blocks) == rows * cols == count
+    cells = sum(len(r) * len(c) for r, c in blocks)
+    assert cells == m.GRID_SIZE[0] * m.GRID_SIZE[1], (rows, cols, cells)
+    covered = {(y, x) for r, c in blocks for y in r for x in c}
+    assert len(covered) == cells, "zones overlap"
+    return count
+
+
+for _r, _c in ((3, 3), (4, 4), (5, 3), (1, 1), (8, 8)):
+    _zone_cells(_r, _c)
+print("grid: 3x3, 4x4, 5x3, 1x1 and 8x8 all tile the capture grid exactly")
+
+m.ZONE_ROWS, m.ZONE_COLS = 4, 4
+m.rebuild_zone_index()
+assert m.parse_zones("1-16") == frozenset(range(1, 17)), "range form follows the grid"
+assert m.parse_zones("all") == frozenset(range(1, 17))
+assert 16 in m.parse_zones("12,16")
+try:
+    m.parse_zones("17")
+except ValueError as exc:
+    assert "1-16" in str(exc), exc
+else:
+    raise AssertionError("zone 17 accepted on a 4x4 grid")
+
+# a mapping that uses zones the smaller grid does not have must not be applied
+m.LIGHT_MAP = "light.a=16; light.b=1-3"
+m.TARGETS = m.parse_light_map(m.LIGHT_MAP)
+_applied, _errors = m.apply_settings({"ZONE_ROWS": 3, "ZONE_COLS": 3}, persist=False)
+assert _errors and "16" in str(_errors), _errors
+assert (m.ZONE_ROWS, m.ZONE_COLS) == (4, 4), "a rejected grid change must not apply"
+print("grid: mapping beyond the new grid is rejected, grid left alone")
+
+# shrinking is fine once the mapping fits
+m.LIGHT_MAP = "light.a=1; light.b=2-3"
+m.TARGETS = m.parse_light_map(m.LIGHT_MAP)
+_applied, _err = m.apply_settings({"ZONE_ROWS": 3, "ZONE_COLS": 3}, persist=False)
+assert not _err, _err
+assert (m.ZONE_ROWS, m.ZONE_COLS) == (3, 3)
+assert m.ZONE_COUNT == 9, m.ZONE_COUNT
+assert len(m.parse_light_map("light.a=1").__getitem__(0).zones) == 1
+print("grid: 4x4 -> 3x3 applies once the mapping fits")
+
+m.ZONE_ROWS, m.ZONE_COLS = _keep_grid
+m.rebuild_zone_index()
+
+# --- close to tray ---------------------------------------------------------
+class _FakeWindow:
+    def __init__(self, can_hide=True):
+        self.can_hide = can_hide
+        self.hidden = 0
+        self.destroyed = 0
+        self.events = type("E", (), {"closing": []})()
+
+    def hide(self):
+        if not self.can_hide:
+            raise RuntimeError("no backend")
+        self.hidden += 1
+
+    def show(self):
+        self.hidden -= 1
+
+    def destroy(self):
+        self.destroyed += 1
+
+
+_win = _FakeWindow()
+assert m._hide_instead_of_close(_win) is False, "close must be vetoed"
+assert _win.hidden == 1, "window must be hidden"
+
+_dead = _FakeWindow(can_hide=False)
+assert m._hide_instead_of_close(_dead) is True, "no backend: allow the close"
+print("tray: closing hides the window, and falls back to closing without a backend")
+
+# a fake pystray so the menu wiring can be inspected without a GUI
+import sys as _sys
+import types as _types
+
+
+class _MenuItem:
+    def __init__(self, label, action, default=False):
+        self.label, self.action, self.default = label, action, default
+
+
+class _Menu:
+    def __init__(self, *items):
+        self.items = items
+
+
+class _Icon:
+    def __init__(self, name, image, title, menu=None):
+        self.name, self.image, self.title, self.menu = name, image, title, menu
+        self.stopped = 0
+        self.ran = 0
+        _FAKE_ICONS.append(self)
+
+    def run(self):
+        self.ran += 1
+
+    def stop(self):
+        self.stopped += 1
+
+
+_FAKE_ICONS = []
+_fake = _types.ModuleType("pystray")
+_fake.Menu, _fake.MenuItem, _fake.Icon = _Menu, _MenuItem, _Icon
+_keep_pystray = _sys.modules.get("pystray")
+_sys.modules["pystray"] = _fake
+_keep_tray_icon = dict(m.TRAY_ICON)
+m.TRAY_ICON.clear()
+
+_win = _FakeWindow()
+m.start_tray_for_window(_win, "http://127.0.0.1:8000/")
+time.sleep(0.15)
+assert _FAKE_ICONS, "no tray icon created"
+_icon = _FAKE_ICONS[-1]
+_labels = [i.label for i in _icon.menu.items]
+assert _labels == ["Open settings", "Quit"], _labels
+assert _icon.menu.items[0].default is True, "left-click must open settings"
+assert _icon.ran == 1, "tray must run on its own thread"
+_icon.menu.items[0].action()
+assert _win.hidden == -1, "Open settings must show the window"
+_icon.menu.items[1].action()
+assert _win.destroyed == 1, "Quit must destroy the window"
+assert _icon.stopped == 1, "Quit must stop the tray icon"
+print("tray: Open settings shows the window, Quit destroys it and stops the icon")
+
+m.TRAY_ICON.clear()
+m.TRAY_ICON.update(_keep_tray_icon)
+if _keep_pystray is not None:
+    _sys.modules["pystray"] = _keep_pystray
+else:
+    _sys.modules.pop("pystray", None)
+
 # --- restore must accept the mode it actually asked for --------------------
 class _Attrs:
     def __init__(self, mode):

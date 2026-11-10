@@ -731,16 +731,25 @@ _last_post = [0.0]
 _posts = []
 
 
+# A radio accepts a frame's worth of commands at once and rejects the *next* frame
+# if it arrives too soon, so measure the gap between frames, not between commands.
 def _fake_post(body, timeout=None):
     now = time.perf_counter()
-    gap = now - _last_post[0]
-    _last_post[0] = now
+    with _frame_lock:
+        if _in_frame[0] <= 0:                 # first command of a frame
+            _in_frame[1] = now - _last_post[0]
+            _last_post[0] = now
+            _in_frame[0] = 3
+        _in_frame[0] -= 1
+        gap = _in_frame[1]
     _posts.append((gap, body))
     if gap < _busy_below:
         return _Resp(False, '{"message": "Failed to enqueue message"}')
     return _Resp(True, "[]")
 
 
+_in_frame = [0, 0.0]
+_frame_lock = threading.Lock()
 _keep_env = (m.DRY_RUN, m.HA_TOKEN, m.check_ha, m._post, m.restore_light, m.session)
 _restored = []
 m.DRY_RUN = False
@@ -756,12 +765,32 @@ class _State:
 
 
 m.session = type("S", (), {"get": staticmethod(lambda *a, **k: _State())})()
-m.TARGETS = [m.Target("light.left_lamp", frozenset({1, 4, 7}))]
+_three = [m.Target("light.left_lamp", frozenset({1, 4, 7})),
+          m.Target("light.center_lamp", frozenset({2, 5, 8})),
+          m.Target("light.right_lamp", frozenset({3, 6, 9}))]
+m.TARGETS = _three
+_posts.clear()
+_restored.clear()
 _report = m.autotune(verbose=False, per_step=3)
 assert _report["ok"], _report
 assert _report["floor"] * 1000 >= _busy_below * 1000 * 0.9, _report
 assert _report["ceiling"] > _report["floor"], _report
 assert _report["busy_at_ms"] is not None, "should have found the cliff"
+
+# every light must be exercised, not just the first
+_probed = {b["entity_id"] for _gap, b in _posts}
+assert _probed == {t.entity_id for t in _three}, _probed
+assert _report["light_count"] == 3, _report
+assert _report["lights"] == [t.entity_id for t in _three], _report
+_rounds = len(_posts) / 3.0
+assert _rounds == int(_rounds), f"each round must hit all three lights, got {len(_posts)} posts"
+
+# ...and every light must be put back, not just the first
+_put_back = {r["entity_id"] for r in _restored}
+assert _put_back == {t.entity_id for t in _three}, _put_back
+assert _report["restored"] == 3, _report
+print(f"autotune: {_report['light_count']} lights probed "
+      f"({len(_posts)} commands) and all restored")
 assert _report["restored"] and _restored, "the light must be put back"
 assert "POST_INTERVAL_FLOOR" in _report["applied"], _report["applied"]
 # a dry run has nothing to measure and must say so rather than pretend

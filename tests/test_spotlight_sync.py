@@ -567,6 +567,26 @@ assert m.settings_snapshot()["HA_TOKEN"] == "<unset>"
 m.HA_URL, m.HA_TOKEN, m.SECRETS_PATH = _orig_url, _orig_token, _orig_secrets
 print("credentials ok: url trimmed, token 0600-persisted, never echoed")
 
+# --- bind address is loopback by default and validated --------------------
+assert m.settings_snapshot()["BIND_HOST"] == "127.0.0.1", "must not expose the UI by default"
+assert m.settings_snapshot()["BIND_PORT"] == 8000
+assert m.SETTINGS_BY_NAME["BIND_HOST"].get("restart") is True
+assert m.SETTINGS_BY_NAME["BIND_PORT"].get("restart") is True
+assert {"BIND_HOST", "BIND_PORT"} <= set(m.get_config()["restart_required"])
+
+_orig_bind = (m.BIND_HOST, m.BIND_PORT)
+applied, errors = m.apply_settings({"BIND_HOST": "0.0.0.0", "BIND_PORT": 9000})
+assert not errors and m.BIND_HOST == "0.0.0.0" and m.BIND_PORT == 9000
+for bad in ("http://0.0.0.0:8000", "0.0.0.0/ui", ""):
+    applied, errors = m.apply_settings({"BIND_HOST": bad})
+    assert errors, f"{bad!r} should be rejected"
+    assert m.BIND_HOST == "0.0.0.0", "a rejected value must not be applied"
+applied, errors = m.apply_settings({"BIND_PORT": "99999"})
+assert m.BIND_PORT == 65535, m.BIND_PORT            # clamped, not crashed
+m.BIND_HOST, m.BIND_PORT = _orig_bind
+m.BIND_HOST, m.BIND_PORT = _orig_bind
+print("bind ok: loopback default, URL rejected, port clamped, restart-tagged")
+
 # --- every HTTP handler must serialise (catches endpoint regressions) -----
 import json as _json
 

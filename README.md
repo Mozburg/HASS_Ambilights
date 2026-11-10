@@ -116,9 +116,16 @@ only value that never comes back over the wire. It is stored in `secrets.json`
 `<set>`/`<unset>`, and masked out of save responses. Leave the field blank to keep the
 saved token, or press **Clear** to remove it.
 
-Note that the UI itself has no authentication and listens on `0.0.0.0:8000` by default,
-so anyone who can reach the port can change settings (and trigger a calibration flash).
-Run it on localhost, or behind your reverse proxy's auth, on a network you trust.
+The UI itself has no authentication, so it listens on **`127.0.0.1:8000` by default** —
+this machine only. `BIND_HOST` and `BIND_PORT` (Server card) change that and need a
+restart; set `BIND_HOST=0.0.0.0` to reach the UI from another device, and only on a
+network you trust, since anyone who can reach that port can change settings, read the
+light mapping, and trigger a calibration flash. The bundled systemd unit sets
+`BIND_HOST=0.0.0.0` explicitly — comment that line out to keep it local. Put it behind
+your reverse proxy's auth if it needs to be reachable from outside.
+
+`config.json` outranks the environment, `BIND_*` included, and the UI warns in the
+footer when it is overriding env values.
 
 ## Endpoints
 

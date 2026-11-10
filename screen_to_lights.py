@@ -391,8 +391,18 @@ SETTINGS = [
     _spec("LIGHT_MAP", "string", "", "Lights", "Light map",
           "entity=zones; entity=zones - zones are 1-9 in reading order, or 'all'."),
 ]
+SETTINGS.extend([
+    _spec("BIND_HOST", "string", "127.0.0.1", "Server", "Listen address",
+          "Interface for the settings UI. 127.0.0.1 = this machine only; 0.0.0.0 = anyone "
+          "who can reach the port, and the UI has no login. Needs a restart.", restart=True),
+    _spec("BIND_PORT", "int", 8000, "Server", "Listen port",
+          "TCP port for the settings UI. Needs a restart.", min=1, max=65535, restart=True),
+])
+
 SETTINGS_BY_NAME = {s["name"]: s for s in SETTINGS}
 SECRETS_PATH = Path(os.getenv("SECRETS_FILE") or CONFIG_PATH.with_name("secrets.json"))
+BIND_HOST = _env("BIND_HOST", "127.0.0.1")
+BIND_PORT = int(_env("BIND_PORT", "8000"))
 SECRET_SET = "<set>"
 SECRET_UNSET = "<unset>"
 
@@ -493,6 +503,13 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
             new[name] = _coerce(spec, raw)
         except (TypeError, ValueError) as exc:
             errors.append(f"{name}: {exc}")
+    if "BIND_HOST" in new:
+        host = str(new["BIND_HOST"]).strip()
+        if "://" in host or "/" in host or " " in host or not host:
+            errors.append("BIND_HOST: a bare address such as 127.0.0.1 or 0.0.0.0")
+            new.pop("BIND_HOST")
+        else:
+            new["BIND_HOST"] = host
     if "LIGHT_MAP" in new:
         try:
             parse_light_map(new["LIGHT_MAP"])
@@ -527,7 +544,11 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
     return new, []
 
 
+CONFIG_LOADED = False
+
+
 def load_config_file(path: Path | None = None) -> None:
+    global CONFIG_LOADED
     path = path or CONFIG_PATH
     if not path.exists():
         return
@@ -539,6 +560,7 @@ def load_config_file(path: Path | None = None) -> None:
     applied, errors = apply_settings(data, persist=False)
     if errors:
         log.error("config problems in %s: %s", path, "; ".join(errors))
+    CONFIG_LOADED = True
     log.info("loaded %d setting(s) from %s", len(applied), path)
 
 
@@ -1465,9 +1487,10 @@ def capture_loop() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global TARGETS
-    ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
-    load_secrets()
-    load_config_file()
+    if not CONFIG_LOADED:
+        ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
+        load_secrets()
+        load_config_file()
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
     check_ha()
     stop_event.clear()
@@ -1530,7 +1553,9 @@ def index_page():
     page = UI_DIR / "index.html"
     if not page.exists():
         return JSONResponse({"detail": "UI missing: static/index.html not found"}, status_code=404)
-    return FileResponse(page, media_type="text/html")
+    # no-store: a UI edit must not need a hard refresh to appear
+    return FileResponse(page, media_type="text/html",
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/config")
@@ -1635,7 +1660,13 @@ def main() -> None:
         if report["error"]:
             print("calibration failed: " + report["error"], file=sys.stderr)
         raise SystemExit(0 if report["ok"] else 1)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    ENV_SNAPSHOT.update(settings_snapshot())
+    load_secrets()
+    load_config_file()             # BIND_* may come from config.json
+    if BIND_HOST not in ("127.0.0.1", "localhost", "::1"):
+        log.warning("settings UI on http://%s:%s — it has no authentication, so anyone "
+                    "who can reach that port can change settings", BIND_HOST, BIND_PORT)
+    uvicorn.run(app, host=BIND_HOST, port=BIND_PORT)
 
 
 if __name__ == "__main__":

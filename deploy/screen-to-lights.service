@@ -8,6 +8,9 @@ Type=simple
 WorkingDirectory=/opt/screen-to-lights
 Environment=HA_URL=http://192.168.1.10:8123
 Environment=HA_TOKEN=replace-me
+# The code defaults to 127.0.0.1 (this machine only). Comment this out to keep the
+# settings UI local — the UI has no login, so only expose it on a trusted network.
+Environment=BIND_HOST=0.0.0.0
 ExecStart=/opt/screen-to-lights/.venv/bin/python screen_to_lights.py
 Restart=on-failure
 RestartSec=5

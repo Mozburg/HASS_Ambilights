@@ -318,6 +318,19 @@ function control(meta, value) {
     return wrap;
   }
   if (meta.type === "float" || meta.type === "int") {
+    if (meta.type === "int" && (meta.max ?? 100) - (meta.min ?? 0) > 2000) {
+      // a 1..65535 slider is unusable (ports), so number-only
+      const only = document.createElement("input");
+      only.type = "number"; only.id = id;
+      only.min = meta.min ?? 0; only.max = meta.max ?? 100; only.step = 1; only.value = value;
+      only.setAttribute("aria-label", meta.label);
+      only.onchange = () => {
+        const v = Math.min(+only.max, Math.max(+only.min, Math.round(+only.value)));
+        only.value = v; CFG[meta.name] = v; setDirty(true);
+      };
+      wrap.appendChild(only);
+      return wrap;
+    }
     const range = document.createElement("input");
     range.type = "range";
     range.min = meta.min ?? 0; range.max = meta.max ?? 100;

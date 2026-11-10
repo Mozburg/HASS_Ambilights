@@ -140,8 +140,11 @@ import numpy as np
 import requests
 import uvicorn
 from fastapi import Body, FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
-from mss import mss
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+try:                       # mss >= 10: mss.mss is deprecated in favour of MSS
+    from mss import MSS as mss
+except ImportError:        # older releases only ship mss.mss
+    from mss import mss
 from PIL import Image
 
 # ---------------------------------------------------------------- config ----
@@ -374,7 +377,8 @@ UI_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Ccircle cx='11' cy='11' r='6' fill='%23ff5c5c'/%3E%3Ccircle cx='21' cy='11' r='6' fill='%2344d17a'/%3E%3Ccircle cx='11' cy='21' r='6' fill='%234493f8'/%3E%3Ccircle cx='21' cy='21' r='6' fill='%23ffd226'/%3E%3C/svg%3E">
 <title>Screen → Lights</title>
 <style>
   :root{
@@ -2618,6 +2622,12 @@ def get_lights(refresh: bool = False):
     payload = {"ok": True, "count": len(found), "lights": found}
     LIGHTS_CACHE.update({"at": now, "data": payload})
     return payload
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """Browsers ask for this regardless; the page carries the icon inline."""
+    return Response(status_code=204)
 
 
 @app.get("/api/config")

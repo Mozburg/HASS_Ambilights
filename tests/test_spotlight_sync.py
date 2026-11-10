@@ -528,6 +528,60 @@ assert m.stats["posts"] >= 1, "never recovered: %s" % m.stats
 print("phase H: recovered, %d posts resume" % m.stats["posts"])
 m.FAIL_THRESHOLD, m.FAIL_COOLDOWN = 3, 10.0
 
+# --- credentials via the settings API ------------------------------------
+import json as _json
+import tempfile
+_tmp = tempfile.mkdtemp()
+_orig_url, _orig_token, _orig_secrets = m.HA_URL, m.HA_TOKEN, m.SECRETS_PATH
+m.SECRETS_PATH = __import__("pathlib").Path(_tmp) / "secrets.json"
+
+assert m.settings_snapshot()["HA_TOKEN"] in ("<set>", "<unset>"), "token must never be reported back"
+assert "test-token" not in _json.dumps(m.settings_snapshot())
+applied, errors = m.apply_settings({"HA_URL": "http://ha.example:8123/", "HA_TOKEN": "tok-123"})
+assert not errors, errors
+assert m.HA_URL == "http://ha.example:8123", m.HA_URL          # trailing slash dropped
+assert m.HA_TOKEN == "tok-123"
+assert m.SECRETS_PATH.exists() and m.SECRETS_PATH.stat().st_mode & 0o777 == 0o600, oct(
+    m.SECRETS_PATH.stat().st_mode)
+assert "tok-123" not in _json.dumps(m.settings_snapshot())
+assert m.settings_snapshot()["HA_TOKEN"] == "<set>"
+assert m.auth_headers() == {"Authorization": "Bearer tok-123"}
+cfg = _json.dumps(m.get_config())
+assert "tok-123" not in cfg, "token leaked through /api/config"
+assert m.get_config()["ha_token_set"] is True
+
+applied, errors = m.apply_settings({"HA_TOKEN": ""})            # blank = keep
+assert m.HA_TOKEN == "tok-123", "blank must not wipe the saved token"
+applied, errors = m.apply_settings({"HA_TOKEN": "<set>"})       # sentinel = keep
+assert m.HA_TOKEN == "tok-123"
+# the HTTP layer must not echo the secret back either
+_saved_token = m.HA_TOKEN
+m.HA_TOKEN = "tok-echo-check"
+_posted = _json.dumps(m.post_config({"settings": {"HA_TOKEN": "tok-echo-check"}}))
+assert "tok-echo-check" not in _posted, "post_config echoed the token"
+m.HA_TOKEN = _saved_token
+
+applied, errors = m.apply_settings({"HA_TOKEN": "--clear--"})   # explicit clear
+assert m.HA_TOKEN == "" and not m.SECRETS_PATH.exists()
+assert m.settings_snapshot()["HA_TOKEN"] == "<unset>"
+m.HA_URL, m.HA_TOKEN, m.SECRETS_PATH = _orig_url, _orig_token, _orig_secrets
+print("credentials ok: url trimmed, token 0600-persisted, never echoed")
+
+# --- every HTTP handler must serialise (catches endpoint regressions) -----
+import json as _json
+
+m.TARGETS = [m.Target("light.a", frozenset({1, 4, 7}))]
+m.latest_data["raw_grid"] = np.zeros((m.GRID_SIZE[1], m.GRID_SIZE[0], 3), np.uint8)
+m.latest_data["regions"] = {"zones": [], "full": None}
+m.latest_data["lights"] = {}
+for handler in (m.health, m.get_config, m.get_regions, m.get_raw_grid):
+    payload = _json.dumps(handler())          # raises on numpy types / bad shapes
+    assert payload.startswith("{"), handler.__name__
+assert m.health()["has_frame"] is True
+m.latest_data["raw_grid"] = np.zeros((0, 0, 3), np.uint8)
+assert m.health()["has_frame"] is False, "empty grid must report no frame"
+print("http handlers ok: health, config, regions, raw_grid all serialise")
+
 # --- crop geometry -------------------------------------------------------
 mont = {"left": 100, "top": 50, "width": 3840, "height": 2160}
 full_targets = [m.Target("light.a", frozenset(range(1, 10)))]

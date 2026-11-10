@@ -3,6 +3,7 @@ __pycache__/
 .venv*/
 venv/
 config.json
+secrets.json
 *.log
 .DS_Store
 .pytest_cache/

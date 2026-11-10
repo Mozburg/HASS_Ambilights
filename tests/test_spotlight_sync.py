@@ -528,6 +528,21 @@ assert m.stats["posts"] >= 1, "never recovered: %s" % m.stats
 print("phase H: recovered, %d posts resume" % m.stats["posts"])
 m.FAIL_THRESHOLD, m.FAIL_COOLDOWN = 3, 10.0
 
+# --- every HTTP handler must serialise (catches endpoint regressions) -----
+import json as _json
+
+m.TARGETS = [m.Target("light.a", frozenset({1, 4, 7}))]
+m.latest_data["raw_grid"] = np.zeros((m.GRID_SIZE[1], m.GRID_SIZE[0], 3), np.uint8)
+m.latest_data["regions"] = {"zones": [], "full": None}
+m.latest_data["lights"] = {}
+for handler in (m.health, m.get_config, m.get_regions, m.get_raw_grid):
+    payload = _json.dumps(handler())          # raises on numpy types / bad shapes
+    assert payload.startswith("{"), handler.__name__
+assert m.health()["has_frame"] is True
+m.latest_data["raw_grid"] = np.zeros((0, 0, 3), np.uint8)
+assert m.health()["has_frame"] is False, "empty grid must report no frame"
+print("http handlers ok: health, config, regions, raw_grid all serialise")
+
 # --- crop geometry -------------------------------------------------------
 mont = {"left": 100, "top": 50, "width": 3840, "height": 2160}
 full_targets = [m.Target("light.a", frozenset(range(1, 10)))]

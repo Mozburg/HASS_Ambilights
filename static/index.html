@@ -13,42 +13,48 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
     font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
-  header{position:sticky;top:0;z-index:10;display:flex;gap:16px;align-items:center;
-    padding:12px 20px;background:rgba(13,17,23,.92);border-bottom:1px solid var(--line);
-    backdrop-filter:blur(8px)}
+  a{color:var(--accent)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  header{position:sticky;top:0;z-index:10;display:flex;gap:14px;align-items:center;
+    padding:12px 20px;background:rgba(13,17,23,.94);border-bottom:1px solid var(--line);
+    backdrop-filter:blur(8px);flex-wrap:wrap}
   header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
   header .live{display:flex;gap:14px;align-items:center;margin-left:auto;font-size:12px;color:var(--muted)}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);display:inline-block}
   .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
   .dot.bad{background:var(--bad)}
-  main{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;padding:20px;max-width:1180px;margin:0 auto}
-  @media(max-width:900px){main{grid-template-columns:1fr}}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:20px;padding:20px;max-width:1200px;margin:0 auto}
+  @media(max-width:940px){main{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:18px}
-  .card h2{margin:0;padding:12px 16px;font-size:13px;text-transform:uppercase;letter-spacing:.08em;
-    color:var(--muted);border-bottom:1px solid var(--line)}
+  .card h2{margin:0;padding:12px 16px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;
+    color:var(--muted);border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center}
   .card .body{padding:14px 16px}
-  .row{display:grid;grid-template-columns:200px 1fr;gap:14px;align-items:start;padding:9px 0;
+  .row{display:grid;grid-template-columns:210px 1fr;gap:16px;align-items:start;padding:10px 0;
     border-top:1px dashed rgba(255,255,255,.06)}
   .row:first-child{border-top:0}
-  .row .label{font-weight:500}
-  .row .help{color:var(--muted);font-size:12px;margin-top:2px}
+  .row.restart-required .label:after{content:"restart";margin-left:8px;font-size:10px;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--warn);border:1px solid rgba(210,153,34,.5);border-radius:4px;
+    padding:1px 4px;vertical-align:middle}
+  .label{font-weight:500;display:block}
+  .help{color:var(--muted);font-size:12px;margin-top:2px}
   .ctl{display:flex;gap:10px;align-items:center}
-  input[type=range]{width:100%;accent-color:var(--accent)}
+  input[type=range]{width:100%;accent-color:var(--accent);background:transparent}
   input[type=number],input[type=text],select{background:var(--panel2);color:var(--text);
     border:1px solid var(--line);border-radius:7px;padding:6px 8px;font:inherit}
-  input[type=number]{width:78px}
+  input[type=number]{width:84px}
   input[type=text]{width:100%;font-family:ui-monospace,monospace;font-size:12px}
-  select{min-width:140px}
-  .val{min-width:44px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+  select{min-width:150px}
   .switch{position:relative;display:inline-block;width:44px;height:24px;flex:none}
-  .switch input{opacity:0;width:0;height:0}
+  .switch input{opacity:0;width:0;height:0;position:absolute}
   .switch span{position:absolute;inset:0;background:#30363d;border-radius:99px;transition:.15s;cursor:pointer}
   .switch span:before{content:"";position:absolute;width:18px;height:18px;left:3px;top:3px;
     background:#e6edf3;border-radius:50%;transition:.15s}
   .switch input:checked + span{background:var(--accent)}
   .switch input:checked + span:before{transform:translateX(20px)}
-  .light{display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;
+  .light{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:12px;align-items:center;
     padding:10px;border:1px solid var(--line);border-radius:9px;margin-bottom:10px;background:var(--panel2)}
+  .light:hover{border-color:#3d4b5c}
+  .chip{width:34px;height:34px;border-radius:8px;border:1px solid var(--line);flex:none}
   .zones{display:grid;grid-template-columns:repeat(3,26px);grid-template-rows:repeat(3,26px);gap:3px}
   .zones button{background:#222932;border:1px solid var(--line);border-radius:5px;color:var(--muted);
     font-size:11px;cursor:pointer;padding:0}
@@ -56,56 +62,77 @@
   .zones button:hover{border-color:var(--accent)}
   .btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;
     padding:7px 12px;font:inherit;cursor:pointer}
-  .btn:hover{border-color:var(--accent)}
+  .btn:hover:not(:disabled){border-color:var(--accent)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
   .btn.primary{background:var(--accent);border-color:var(--accent);color:#0b1118;font-weight:600}
-  .btn.danger:hover{border-color:var(--bad);color:var(--bad)}
-  .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-  aside .card{position:sticky;top:74px}
-  .swatch{height:96px;border-radius:9px;border:1px solid var(--line);background:#000;
+  .btn.danger:hover:not(:disabled){border-color:var(--bad);color:var(--bad)}
+  .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:14px 0 26px}
+  aside .card{position:sticky;top:70px}
+  .swatch{height:82px;border-radius:9px;border:1px solid var(--line);background:#000;
     display:flex;align-items:flex-end;justify-content:space-between;padding:8px;font-size:11px;
     font-family:ui-monospace,monospace;text-shadow:0 1px 3px #000}
-  .kv{display:flex;justify-content:space-between;padding:4px 0;font-size:12px;border-top:1px dashed rgba(255,255,255,.06)}
+  .kvs{display:grid;gap:2px;margin-top:10px}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:12px;
+    border-top:1px dashed rgba(255,255,255,.06)}
   .kv:first-child{border-top:0}
   .kv b{font-weight:500;color:var(--muted)}
-  .zonebits{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;margin:6px 0}
-  .zonebits div{height:14px;border-radius:3px;background:#222932}
-  #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%) translateY(80px);
+  .kv span{font-variant-numeric:tabular-nums}
+  .zonebits{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;margin:8px 0}
+  .zonebits div{height:16px;border-radius:3px;background:#222932;position:relative}
+  .zonebits div.used{box-shadow:inset 0 0 0 1px var(--accent)}
+  .lightlive{padding:8px 0;border-top:1px dashed rgba(255,255,255,.06)}
+  .lightlive:first-child{border-top:0;padding-top:0}
+  .lightlive .name{font-size:12px;font-family:ui-monospace,monospace;color:var(--muted);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lightlive .bar{display:flex;align-items:center;gap:8px;margin-top:4px}
+  .lightlive .mini{width:26px;height:26px;border-radius:6px;border:1px solid var(--line);flex:none}
+  .lightlive .meta{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .badge{font-size:11px;padding:1px 6px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .badge.dirty{color:var(--warn);border-color:rgba(210,153,34,.5)}
+  .banner{border:1px solid var(--bad);background:rgba(248,81,73,.08);color:#ffb4ae;
+    border-radius:9px;padding:10px 14px;margin-bottom:16px;font-size:13px}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(90px);
     background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px 16px;
-    transition:.2s;max-width:80vw;z-index:20}
+    transition:.2s;max-width:min(90vw,620px);z-index:20;box-shadow:0 8px 24px rgba(0,0,0,.45)}
   #toast.show{transform:translateX(-50%) translateY(0)}
   #toast.err{border-color:var(--bad);color:#ffb4ae}
   small.mono{font-family:ui-monospace,monospace;color:var(--muted)}
+  .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+    clip:rect(0 0 0 0);white-space:nowrap;border:0}
 </style>
 </head>
 <body>
 <header>
   <h1>Screen → Lights</h1>
+  <span class="badge" id="dirtybadge" hidden>unsaved changes</span>
   <span class="live">
-    <span id="dot" class="dot"></span><span id="conn">connecting</span>
+    <span id="dot" class="dot"></span><span id="conn">connecting…</span>
     <span id="hapill" class="mono"></span>
   </span>
 </header>
 
 <main>
   <div>
+    <div id="loaderror"></div>
     <div id="settings"></div>
 
     <div class="card">
       <h2>Lights</h2>
       <div class="body">
         <div id="lights"></div>
-        <div class="actions" style="margin-top:6px">
-          <button class="btn" onclick="addLight()">+ Add light</button>
-          <small class="mono">zones are 3×3 in reading order · 1 2 3 / 4 5 6 / 7 8 9</small>
+        <div class="actions" style="padding:6px 0 0">
+          <button class="btn" id="addlight" type="button">+ Add light</button>
+          <small class="mono">Zones are a 3×3 grid in reading order: 1 2 3 / 4 5 6 / 7 8 9.
+            Leave empty to use <code>LIGHT_ENTITY_ID</code> for the whole screen.</small>
         </div>
       </div>
     </div>
 
-    <div class="actions" style="position:sticky;bottom:0;padding:14px 0;
-      background:linear-gradient(transparent,var(--bg) 40%)">
-      <button class="btn primary" onclick="save()">Save &amp; apply</button>
-      <button class="btn" onclick="reload()">Revert</button>
-      <button class="btn danger" onclick="resetDefaults()">Reset to defaults</button>
+    <div class="actions">
+      <button class="btn primary" id="save" type="button">Save &amp; apply</button>
+      <button class="btn" id="revert" type="button">Revert</button>
+      <button class="btn" id="calibrate" type="button">Calibrate…</button>
+      <button class="btn danger" id="reset" type="button">Reset to defaults</button>
       <small class="mono" id="cfgpath"></small>
     </div>
   </div>
@@ -114,40 +141,58 @@
     <div class="card">
       <h2>Live</h2>
       <div class="body">
-        <div class="swatch" id="swatch"><span id="hex">—</span><span id="xy"></span></div>
-        <div class="zonebits" id="zonebits"></div>
-        <div class="kv"><b>posts</b><span id="s-posts">–</span></div>
-        <div class="kv"><b>per second</b><span id="s-rate">–</span></div>
-        <div class="kv"><b>frame age</b><span id="s-age">–</span></div>
-        <div class="kv"><b>prep</b><span id="s-prep">–</span></div>
-        <div class="kv"><b>cycle</b><span id="s-cycle">–</span></div>
-        <div class="kv"><b>pace / transition</b><span id="s-pace">–</span></div>
-        <div class="kv"><b>busy · stalls · timeouts</b><span id="s-err">–</span></div>
-        <div class="kv"><b>idle</b><span id="s-idle">–</span></div>
+        <div id="lightlive"></div>
+        <div class="zonebits" id="zonebits" aria-hidden="true"></div>
+        <div class="kvs">
+          <div class="kv"><b>posts</b><span id="s-posts">–</span></div>
+          <div class="kv"><b>per second</b><span id="s-rate">–</span></div>
+          <div class="kv"><b>frame age</b><span id="s-age">–</span></div>
+          <div class="kv"><b>prep</b><span id="s-prep">–</span></div>
+          <div class="kv"><b>cycle</b><span id="s-cycle">–</span></div>
+          <div class="kv"><b>pace / transition</b><span id="s-pace">–</span></div>
+          <div class="kv"><b>busy · stalls · timeouts</b><span id="s-err">–</span></div>
+          <div class="kv"><b>idle</b><span id="s-idle">–</span></div>
+          <div class="kv"><b>calibration</b><span id="s-cal">–</span></div>
+        </div>
       </div>
     </div>
   </aside>
 </main>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 let META = [], CFG = {}, LIGHTS = [], dirty = false, lastPosts = null, lastPostT = null, rate = 0;
+let LASTCONFIG = null;
 
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 const toast = (msg, err) => {
   const t = $("toast");
-  t.textContent = msg; t.className = "show" + (err ? " err" : "");
-  clearTimeout(t._t); t._t = setTimeout(() => (t.className = ""), err ? 6000 : 2500);
+  t.textContent = msg;
+  t.className = "show" + (err ? " err" : "");
+  clearTimeout(t._t);
+  t._t = setTimeout(() => { t.className = ""; }, err ? 7000 : 2600);
 };
 
+function setDirty(v) {
+  dirty = v;
+  $("dirtybadge").hidden = !v;
+  $("save").disabled = !v;
+  $("revert").disabled = !v;
+}
+
+/* ---------------------------------------------------------------- lights -- */
 function parseMap(text) {
   const out = [];
   (text || "").split(";").forEach((chunk) => {
-    chunk = chunk.trim(); if (!chunk) return;
+    chunk = chunk.trim();
+    if (!chunk) return;
     const [entity, zones] = chunk.split("=");
     const set = new Set();
-    const spec = (zones || "all").trim().toLowerCase();
+    const spec = (zones ?? "all").trim().toLowerCase();
     if (spec === "all" || spec === "*" || spec === "") { for (let i = 1; i <= 9; i++) set.add(i); }
     else spec.replace(/\s/g, "").split(",").forEach((p) => {
       if (p.includes("-")) { const [a, b] = p.split("-"); for (let i = +a; i <= +b; i++) set.add(i); }
@@ -157,155 +202,339 @@ function parseMap(text) {
   });
   return out;
 }
-function serializeMap(list) {
-  return list.filter((l) => l.entity.trim())
-    .map((l) => {
-      const z = [...l.zones].sort((a, b) => a - b);
-      return l.entity.trim() + "=" + (z.length === 9 ? "all" : z.join(","));
-    }).join("; ");
-}
+
+const serializeMap = (list) => list
+  .filter((l) => l.entity.trim())
+  .map((l) => {
+    const z = [...l.zones].sort((a, b) => a - b);
+    return l.entity.trim() + "=" + (z.length === 9 ? "all" : (z.join(",") || "all"));
+  }).join("; ");
 
 function renderLights() {
-  const box = $("lights"); box.innerHTML = "";
+  const box = $("lights");
+  box.innerHTML = "";
   if (!LIGHTS.length) {
-    box.innerHTML = '<small class="mono">No lights yet — add one, or leave LIGHT_MAP empty to drive the '
-      + 'entity from HA_URL defaults.</small>';
+    box.innerHTML = '<small class="mono">No lights mapped — the whole screen will drive '
+      + "<code>LIGHT_ENTITY_ID</code>. Add one to split the screen into zones.</small>";
   }
   LIGHTS.forEach((light, i) => {
-    const row = document.createElement("div"); row.className = "light";
+    const row = document.createElement("div");
+    row.className = "light";
+
     const name = document.createElement("input");
-    name.type = "text"; name.value = light.entity; name.placeholder = "light.left_lamp";
-    name.oninput = () => { LIGHTS[i].entity = name.value; dirty = true; };
-    const zones = document.createElement("div"); zones.className = "zones";
+    name.type = "text";
+    name.value = light.entity;
+    name.placeholder = "light.left_lamp";
+    name.id = `light-${i}`;
+    name.setAttribute("aria-label", `Light ${i + 1} entity id`);
+    name.oninput = () => { LIGHTS[i].entity = name.value; setDirty(true); };
+
+    const zones = document.createElement("div");
+    zones.className = "zones";
+    zones.setAttribute("role", "group");
+    zones.setAttribute("aria-label", `Light ${i + 1} zones`);
     for (let z = 1; z <= 9; z++) {
       const b = document.createElement("button");
-      b.textContent = z; b.className = light.zones.has(z) ? "on" : "";
+      b.type = "button";
+      b.textContent = z;
+      b.className = light.zones.has(z) ? "on" : "";
+      b.setAttribute("aria-pressed", light.zones.has(z) ? "true" : "false");
+      b.title = `Zone ${z}`;
       b.onclick = () => {
         light.zones.has(z) ? light.zones.delete(z) : light.zones.add(z);
-        b.className = light.zones.has(z) ? "on" : ""; dirty = true;
+        b.className = light.zones.has(z) ? "on" : "";
+        b.setAttribute("aria-pressed", light.zones.has(z) ? "true" : "false");
+        setDirty(true);
+        markUsedZones();
       };
       zones.appendChild(b);
     }
+
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    chip.dataset.chip = light.entity || `light-${i}`;
+    chip.title = "current colour";
+
     const del = document.createElement("button");
-    del.className = "btn danger"; del.textContent = "✕";
-    del.onclick = () => { LIGHTS.splice(i, 1); dirty = true; renderLights(); };
-    row.append(name, zones, del);
+    del.type = "button";
+    del.className = "btn danger";
+    del.textContent = "✕";
+    del.title = `Remove ${light.entity || "light"}`;
+    del.setAttribute("aria-label", `Remove light ${light.entity || i + 1}`);
+    del.onclick = () => { LIGHTS.splice(i, 1); setDirty(true); renderLights(); markUsedZones(); };
+
+    row.append(name, zones, chip, del);
     box.appendChild(row);
   });
+  markUsedZones();
 }
-function addLight() { LIGHTS.push({ entity: "", zones: new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]) }); dirty = true; renderLights(); }
 
+function addLight() {
+  LIGHTS.push({ entity: "", zones: new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]) });
+  setDirty(true);
+  renderLights();
+}
+
+function markUsedZones() {
+  const used = new Set();
+  LIGHTS.forEach((l) => l.zones.forEach((z) => used.add(z)));
+  [...$("zonebits").children].forEach((cell, i) => {
+    cell.classList.toggle("used", used.has(i + 1));
+  });
+}
+
+/* -------------------------------------------------------------- settings -- */
 function control(meta, value) {
-  const wrap = document.createElement("div"); wrap.className = "ctl";
+  const wrap = document.createElement("div");
+  wrap.className = "ctl";
+  const id = `set-${meta.name}`;
+
   if (meta.type === "bool") {
-    const l = document.createElement("label"); l.className = "switch";
-    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = !!value;
+    const label = document.createElement("label");
+    label.className = "switch";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = !!value; cb.id = id;
     const sp = document.createElement("span");
-    cb.onchange = () => { CFG[meta.name] = cb.checked; dirty = true; };
-    l.append(cb, sp); wrap.appendChild(l); return wrap;
+    cb.onchange = () => { CFG[meta.name] = cb.checked; setDirty(true); };
+    label.append(cb, sp);
+    wrap.appendChild(label);
+    return wrap;
   }
   if (meta.type === "enum") {
     const sel = document.createElement("select");
+    sel.id = id;
     meta.values.forEach((v) => {
-      const o = document.createElement("option"); o.value = v; o.textContent = v;
-      if (v === value) o.selected = true; sel.appendChild(o);
+      const o = document.createElement("option");
+      o.value = v; o.textContent = v;
+      if (v === value) o.selected = true;
+      sel.appendChild(o);
     });
-    sel.onchange = () => { CFG[meta.name] = sel.value; dirty = true; };
-    wrap.appendChild(sel); return wrap;
+    sel.onchange = () => { CFG[meta.name] = sel.value; setDirty(true); };
+    wrap.appendChild(sel);
+    return wrap;
   }
   if (meta.type === "float" || meta.type === "int") {
-    const r = document.createElement("input");
-    r.type = "range"; r.min = meta.min ?? 0; r.max = meta.max ?? 100;
-    r.step = meta.step ?? (meta.type === "int" ? 1 : 0.01); r.value = value;
+    const range = document.createElement("input");
+    range.type = "range";
+    range.min = meta.min ?? 0; range.max = meta.max ?? 100;
+    range.step = meta.step ?? (meta.type === "int" ? 1 : 0.01);
+    range.value = value; range.id = id;
+    range.setAttribute("aria-label", meta.label);
     const num = document.createElement("input");
-    num.type = "number"; num.min = r.min; num.max = r.max; num.step = r.step; num.value = value;
+    num.type = "number";
+    num.min = range.min; num.max = range.max; num.step = range.step; num.value = value;
+    num.setAttribute("aria-label", `${meta.label} value`);
     const sync = (v) => {
-      v = Math.min(+r.max, Math.max(+r.min, +v)); CFG[meta.name] = v;
-      r.value = v; num.value = v; dirty = true;
+      v = Math.min(+range.max, Math.max(+range.min, +v));
+      CFG[meta.name] = v; range.value = v; num.value = v; setDirty(true);
     };
-    r.oninput = () => sync(r.value); num.onchange = () => sync(num.value);
-    wrap.append(r, num); return wrap;
+    range.oninput = () => sync(range.value);
+    num.onchange = () => sync(num.value);
+    wrap.append(range, num);
+    return wrap;
   }
-  const t = document.createElement("input"); t.type = "text"; t.value = value ?? "";
-  t.oninput = () => { CFG[meta.name] = t.value; dirty = true; };
-  wrap.appendChild(t); return wrap;
+  const text = document.createElement("input");
+  text.type = "text"; text.value = value ?? ""; text.id = id;
+  text.oninput = () => { CFG[meta.name] = text.value; setDirty(true); };
+  wrap.appendChild(text);
+  return wrap;
 }
 
-function renderSettings(meta) {
+function renderSettings() {
   const groups = {};
-  meta.filter((m) => m.name !== "LIGHT_MAP").forEach((m) => (groups[m.group] ||= []).push(m));
-  const host = $("settings"); host.innerHTML = "";
+  META.filter((m) => m.name !== "LIGHT_MAP").forEach((m) => (groups[m.group] ||= []).push(m));
+  const host = $("settings");
+  host.innerHTML = "";
   Object.entries(groups).forEach(([group, items]) => {
-    const card = document.createElement("div"); card.className = "card";
-    card.innerHTML = `<h2>${group}</h2>`;
-    const body = document.createElement("div"); body.className = "body";
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h2>${esc(group)}</h2>`;
+    const body = document.createElement("div");
+    body.className = "body";
     items.forEach((m) => {
-      const row = document.createElement("div"); row.className = "row";
+      const row = document.createElement("div");
+      row.className = "row" + (m.restart ? " restart-required" : "");
       const left = document.createElement("div");
-      left.innerHTML = `<div class="label">${m.label}</div><div class="help">${m.help || ""}</div>`;
+      const lab = document.createElement("label");
+      lab.className = "label";
+      lab.htmlFor = `set-${m.name}`;
+      lab.textContent = m.label;
+      const help = document.createElement("div");
+      help.className = "help";
+      help.textContent = m.help || "";
+      left.append(lab, help);
       row.append(left, control(m, CFG[m.name]));
       body.appendChild(row);
     });
-    card.appendChild(body); host.appendChild(card);
+    card.appendChild(body);
+    host.appendChild(card);
   });
 }
 
+/* ------------------------------------------------------------------ data -- */
 async function reload() {
-  const r = await fetch("/api/config");
-  const data = await r.json();
-  META = data.meta; CFG = data.settings;
+  let data;
+  try {
+    const r = await fetch("/api/config");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    $("loaderror").innerHTML =
+      `<div class="banner">Could not load settings from the server (${esc(e.message)}).
+       The backend may still be starting — retry in a moment.</div>`;
+    return;
+  }
+  LASTCONFIG = data;
+  if (data.env_shadowed && data.env_shadowed.length) {
+    $("loaderror").innerHTML =
+      `<div class="banner" style="border-color:rgba(210,153,34,.55);background:rgba(210,153,34,.08);
+        color:#e3b341">${esc(data.config_path)} is overriding ${data.env_shadowed.length}
+        environment setting(s): ${esc(data.env_shadowed.join(", "))}.
+        Delete that file or press <em>Reset to defaults</em> to let the environment win.</div>`;
+  } else {
+    $("loaderror").innerHTML = "";
+  }
+  META = data.meta;
+  CFG = data.settings;
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
-  renderSettings(META); renderLights(); dirty = false;
+  renderSettings();
+  renderLights();
+  setDirty(false);
 }
 
 async function save() {
   CFG.LIGHT_MAP = serializeMap(LIGHTS);
-  const r = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ settings: CFG }),
-  });
-  const data = await r.json();
-  if (!data.ok) { toast("Rejected: " + data.errors.join(" · "), true); return; }
-  toast("Saved & applied" + (data.restart_required.length
-    ? " · restart for " + data.restart_required.join(", ") : ""));
-  dirty = false; reload();
+  $("save").disabled = true;
+  try {
+    const r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: CFG }),
+    });
+    const data = await r.json();
+    if (!data.ok) {
+      toast("Rejected: " + data.errors.join(" · "), true);
+      $("save").disabled = false;
+      return;
+    }
+    toast("Saved & applied" + (data.restart_required.length
+      ? " — restart to apply " + data.restart_required.join(", ") : ""));
+    await reload();
+  } catch (e) {
+    toast("Save failed: " + e.message, true);
+    $("save").disabled = false;
+  }
 }
 
 async function resetDefaults() {
   if (!confirm("Reset every setting to its default and rewrite config.json?")) return;
-  const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reset: true }) });
-  const data = await r.json();
-  if (!data.ok) { toast("Rejected: " + data.errors.join(" · "), true); return; }
-  toast("Defaults restored"); reload();
+  try {
+    const r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reset: true }),
+    });
+    const data = await r.json();
+    if (!data.ok) { toast("Rejected: " + data.errors.join(" · "), true); return; }
+    toast("Defaults restored");
+    await reload();
+  } catch (e) {
+    toast("Reset failed: " + e.message, true);
+  }
 }
 
+async function calibrate() {
+  const entity = (LIGHTS.find((l) => l.entity.trim()) || {}).entity
+    || (LASTCONFIG && LASTCONFIG.lights[0] && LASTCONFIG.lights[0].entity) || "the light";
+  if (!confirm(`Measure colour accuracy on ${entity}?\n\nIt will flash twelve test colours `
+    + "for about seven seconds, then restore the light's previous state.")) return;
+  $("calibrate").disabled = true;
+  try {
+    const r = await fetch("/api/calibrate", { method: "POST" });
+    const data = await r.json();
+    if (!data.ok) { toast("Calibration: " + data.error, true); $("calibrate").disabled = false; return; }
+    toast(`Calibrating ${data.entity}…`);
+    const started = Date.now();
+    const poll = setInterval(async () => {
+      const h = await fetch("/health").then((x) => x.json()).catch(() => null);
+      if (!h) return;
+      if (h.stats && h.stats.calibrating) {
+        if (Date.now() - started > 30000) { clearInterval(poll); $("calibrate").disabled = false; }
+        return;
+      }
+      clearInterval(poll);
+      $("calibrate").disabled = false;
+      const rep = (h.stats || {}).calibration;
+      if (!rep) { toast("Calibration finished without a report", true); return; }
+      if (rep.error) { toast("Calibration failed: " + rep.error, true); return; }
+      if (rep.dry_run) { toast("Dry run: payloads logged, nothing sent"); return; }
+      toast(`Calibration: worst du'v' ${rep.worst_duv} (dE76 ${rep.worst_de}) over `
+        + `${rep.samples.length} colours · light ${rep.restored ? "restored" : "NOT restored"}`,
+        !rep.restored);
+    }, 1000);
+  } catch (e) {
+    toast("Calibration request failed: " + e.message, true);
+    $("calibrate").disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ live -- */
 function hexFromXy(x, y) {
   if (x == null || y == null || y <= 0) return null;
   const X = x / y, Y = 1, Z = (1 - x - y) / y;
-  let r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
-  let g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
-  let b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+  const lin = [
+    3.2406 * X - 1.5372 * Y - 0.4986 * Z,
+    -0.9689 * X + 1.8758 * Y + 0.0415 * Z,
+    0.0557 * X - 0.2040 * Y + 1.0570 * Z,
+  ];
   const enc = (v) => {
     v = Math.max(0, Math.min(1, v));
     return v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
   };
-  const ch = [enc(r), enc(g), enc(b)].map((v) => Math.round(v * 255));
-  return "#" + ch.map((v) => v.toString(16).padStart(2, "0")).join("");
+  return "#" + lin.map((v) => Math.round(enc(v) * 255).toString(16).padStart(2, "0")).join("");
+}
+
+function renderLightLive(health) {
+  const host = $("lightlive");
+  const lights = (health && health.lights) || [];
+  host.innerHTML = "";
+  if (!lights.length) {
+    host.innerHTML = '<div class="lightlive"><div class="name">no lights configured</div></div>';
+    return;
+  }
+  lights.forEach((l) => {
+    const colour = l.colour || null;
+    const hex = colour && colour.xy ? hexFromXy(colour.xy[0], colour.xy[1]) : null;
+    const sent = l.last_sent;
+    const block = document.createElement("div");
+    block.className = "lightlive";
+    block.innerHTML =
+      `<div class="name" title="${esc(l.entity)}">${esc(l.entity)}</div>
+       <div class="bar">
+         <span class="mini" style="background:${hex || "#111"}"></span>
+         <span class="meta">${hex || "no frame yet"}
+           ${sent && sent.brightness != null ? "· bri " + sent.brightness : ""}
+           · ${esc((l.zones || []).join(",")) || "all"}</span>
+       </div>
+       <div class="meta">${l.posts} posts · ${l.busy} busy · ${l.errors} errors</div>`;
+    host.appendChild(block);
+    const chip = document.querySelector(`.chip[data-chip="${CSS.escape(l.entity)}"]`);
+    if (chip && hex) chip.style.background = hex;
+  });
 }
 
 async function tick() {
   try {
     const h = await fetch("/health").then((r) => r.json());
-    $("dot").className = "dot on"; $("conn").textContent = "connected";
+    $("dot").className = "dot on";
+    $("conn").textContent = "connected";
     const s = h.stats || {};
-    const now = performance.now();
     if (lastPosts !== null && lastPostT !== null && s.posts >= lastPosts) {
-      const dt = (now - lastPostT) / 1000;
-      if (dt > 0.3) { rate = (s.posts - lastPosts) / dt; lastPosts = s.posts; lastPostT = now; }
-    } else { lastPosts = s.posts ?? 0; lastPostT = now; }
+      const dt = (performance.now() - lastPostT) / 1000;
+      if (dt > 0.3) { rate = (s.posts - lastPosts) / dt; lastPosts = s.posts; lastPostT = performance.now(); }
+    } else { lastPosts = s.posts ?? 0; lastPostT = performance.now(); }
     $("s-posts").textContent = s.posts ?? "–";
     $("s-rate").textContent = rate ? rate.toFixed(1) + " /s" : "–";
     $("s-age").textContent = s.age_ms != null ? s.age_ms.toFixed(0) + " ms" : "–";
@@ -314,31 +543,49 @@ async function tick() {
     $("s-pace").textContent = (s.pace_ms ?? "–") + " ms / " + (s.transition ?? "–") + " s";
     $("s-err").textContent = `${s.busy ?? 0} · ${s.radio_stalls ?? 0} · ${s.timeouts ?? 0}`;
     $("s-idle").textContent = s.idle ? "yes" : "no";
+    if (s.calibrating) $("s-cal").textContent = "running…";
+    else if (s.calibration) {
+      $("s-cal").textContent = s.calibration.error
+        ? "failed"
+        : s.calibration.dry_run ? "dry run"
+        : `du'v' ${s.calibration.worst_duv} · dE ${s.calibration.worst_de}`;
+    } else $("s-cal").textContent = "–";
+
+    renderLightLive(h);
 
     const zones = await fetch("/regions").then((r) => r.json()).catch(() => null);
-    if (zones && zones.zones && zones.zones.length === 9) {
-      const zb = $("zonebits"); zb.innerHTML = "";
+    if (zones && Array.isArray(zones.zones) && zones.zones.length === 9) {
+      const zb = $("zonebits");
+      if (zb.children.length !== 9) {
+        zb.innerHTML = "";
+        for (let i = 1; i <= 9; i++) {
+          const d = document.createElement("div");
+          d.title = `zone ${i}`;
+          zb.appendChild(d);
+        }
+      }
       zones.zones.forEach((z, i) => {
-        const d = document.createElement("div");
-        d.title = "zone " + (i + 1);
-        d.style.background = z.xy ? hexFromXy(z.xy[0], z.xy[1]) || "#222932" : "#222932";
-        zb.appendChild(d);
+        const cell = zb.children[i];
+        cell.style.background = z && z.xy ? (hexFromXy(z.xy[0], z.xy[1]) || "#222932") : "#222932";
+        cell.title = `zone ${i + 1}` + (z && z.xy ? ` · xy ${z.xy[0]}, ${z.xy[1]}` : " · no data");
       });
-    }
-    const light = (h.lights || [])[0];
-    const col = light && light.colour;
-    if (col && col.xy) {
-      const hex = hexFromXy(col.xy[0], col.xy[1]) || "#000000";
-      $("swatch").style.background = hex;
-      $("hex").textContent = hex;
-      $("xy").textContent = `xy ${col.xy[0]}, ${col.xy[1]} · bri ${light.last_sent ? light.last_sent.brightness : "–"}`;
+      markUsedZones();
     }
   } catch (e) {
-    $("dot").className = "dot bad"; $("conn").textContent = "offline";
+    $("dot").className = "dot bad";
+    $("conn").textContent = "offline";
   }
 }
 
-window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+/* ----------------------------------------------------------------- wiring -- */
+$("save").addEventListener("click", save);
+$("revert").addEventListener("click", reload);
+$("reset").addEventListener("click", resetDefaults);
+$("calibrate").addEventListener("click", calibrate);
+$("addlight").addEventListener("click", addLight);
+window.addEventListener("beforeunload", (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+});
 reload().then(() => { tick(); setInterval(tick, 1000); });
 </script>
 </body>

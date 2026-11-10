@@ -53,6 +53,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from collections import defaultdict
@@ -291,6 +292,7 @@ ZONE_INDEX = _build_zone_index(*GRID_SIZE)
 CONFIG_PATH = Path(os.getenv("CONFIG_FILE") or Path(__file__).with_name("config.json"))
 UI_DIR = Path(__file__).with_name("static")
 GEOMETRY_REV = 0            # bumped when the light/zone map changes at runtime
+ENV_SNAPSHOT: dict = {}     # settings as the environment left them, before config.json
 
 
 def _spec(name, kind, default, group, label, help_text="", **kw):
@@ -486,7 +488,8 @@ stats = {"posts": 0, "frames": 0, "dropped": 0, "rtt_ms": None, "interval_ms": N
          "transition": None, "errors": 0, "busy": 0, "pace_ms": None,
          "age_ms": None, "max_age_ms": None, "saturation_k": None,
          "prep_ms": None, "idle": False, "cycle_ms": None, "crop": None,
-         "timeouts": 0, "radio_stalls": 0}
+         "timeouts": 0, "radio_stalls": 0,
+         "calibrating": False, "calibration": None}
 _last_error_log = 0.0
 
 session = requests.Session()
@@ -1133,19 +1136,40 @@ CALIBRATION_SET = [
 ]
 
 
-def calibrate() -> int:
-    """Push test colours to one light, measure the chromaticity it reports back."""
-    if not DRY_RUN and not check_ha():
-        return 1
-    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
-    before = {}
-    try:
-        before = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json()
-    except requests.RequestException as exc:
-        log.error("Could not read current light state: %s", exc)
-        return 1
+CALIBRATION_LOCK = threading.Lock()
 
-    attrs = before.get("attributes", {})
+
+def calibrate(verbose: bool = True) -> dict:
+    """Push test colours to one light and measure the chromaticity it reports back.
+
+    Returns a report dict so the CLI and the web UI can show the same numbers.
+    """
+    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
+    report = {
+        "entity": entity,
+        "zones": TARGETS[0].zone_label if TARGETS else "1-9",
+        "dry_run": DRY_RUN,
+        "samples": [],
+        "worst_duv": None,
+        "worst_de": None,
+        "restored": False,
+        "ok": False,
+        "error": None,
+    }
+    say = print if verbose else (lambda *a, **k: None)
+
+    if not DRY_RUN and not check_ha():
+        report["error"] = "Home Assistant is unreachable or the token was rejected"
+        return report
+    if DRY_RUN:
+        attrs = {}                                  # no HA needed to dry-run
+    else:
+        try:
+            attrs = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json().get("attributes", {})
+        except requests.RequestException as exc:
+            report["error"] = f"could not read the light's current state: {exc}"
+            return report
+
     restore = {"entity_id": entity}
     if attrs.get("color_mode") == "xy" and attrs.get("xy_color"):
         restore["xy_color"] = attrs["xy_color"]
@@ -1154,40 +1178,53 @@ def calibrate() -> int:
     if attrs.get("brightness"):
         restore["brightness"] = attrs["brightness"]
 
-    worst_uv, worst_e = 0.0, 0.0
-    print(f"calibrating {entity} (zones {TARGETS[0].zone_label if TARGETS else 'all'})")
+    worst_uv = worst_e = 0.0
+    say(f"calibrating {entity} (zones {report['zones']})")
     try:
         for target_rgb in CALIBRATION_SET:
             xy = xy_from_rgb(target_rgb)
             body = {"entity_id": entity, "xy_color": [round(xy[0], 4), round(xy[1], 4)],
                     "brightness": 128, "transition": 0}
             if DRY_RUN:
-                print(f"DRY_RUN would send {target_rgb} -> xy {body['xy_color']}")
+                say(f"DRY_RUN would send {target_rgb} -> xy {body['xy_color']}")
                 continue
             _post(body)
             time.sleep(0.5)
             got = session.get(f"{HA_URL}/api/states/{entity}", timeout=5).json().get("attributes", {})
             got_xy = got.get("xy_color") or []
             if len(got_xy) != 2:
-                print(f"{target_rgb}: no xy reported (mode={got.get('color_mode')})")
+                say(f"{target_rgb}: no xy reported (mode={got.get('color_mode')})")
                 continue
             d_uv = _neo(xy, got_xy)
             # Equal-lightness comparison: HA's rgb_color attribute is its own
             # wide-gamut, clipping reconstruction, not what the lamp emits.
-            y_target = float(_linear_to_xyz(_srgb_to_linear(np.asarray(target_rgb, dtype=np.float32) / 255.0))[1])
+            y_target = float(_linear_to_xyz(_srgb_to_linear(
+                np.asarray(target_rgb, dtype=np.float32) / 255.0))[1])
             comparable = srgb_from_xy(got_xy, max(y_target, 1e-4))
             d_e = delta_e(target_rgb, comparable)
             worst_uv, worst_e = max(worst_uv, d_uv), max(worst_e, d_e)
-            print(f"target {str(target_rgb):>18} -> xy {[round(v, 3) for v in got_xy]}  d_uv'={d_uv:.4f}  dE76={d_e:5.1f}")
+            report["samples"].append({"target": target_rgb,
+                                      "xy": [round(v, 4) for v in got_xy],
+                                      "duv": round(d_uv, 4), "de": round(d_e, 1)})
+            say(f"target {str(target_rgb):>18} -> xy {[round(v, 3) for v in got_xy]}  "
+                f"d_uv'={d_uv:.4f}  dE76={d_e:5.1f}")
     finally:
-        if not DRY_RUN and restore_light(restore):
-            log.info("Light restored to %s", {k: v for k, v in restore.items() if k != "entity_id"})
+        if not DRY_RUN:
+            report["restored"] = restore_light(restore)
+            if report["restored"]:
+                log.info("Light restored to %s", {k: v for k, v in restore.items() if k != "entity_id"})
 
-    print(f"\nworst chromaticity error: du'v'={worst_uv:.4f} "
-          f"({'visible' if worst_uv > 0.003 else 'imperceptible'}, 0.003 ~= 1 step)")
-    print(f"worst colour error at equal lightness: dE76={worst_e:.1f} "
-          f"({'visible' if worst_e > 2 else 'imperceptible'})")
-    return 0
+    if report["samples"]:
+        report["worst_duv"] = round(worst_uv, 4)
+        report["worst_de"] = round(worst_e, 1)
+    report["ok"] = bool(report["samples"]) or DRY_RUN
+    if report["samples"]:
+        say(f"\nworst chromaticity error: du'v'={worst_uv:.4f} "
+            f"({'visible' if worst_uv > 0.003 else 'imperceptible'}, 0.003 ~= 1 step)")
+        say(f"worst colour error at equal lightness: dE76={worst_e:.1f} "
+            f"({'visible' if worst_e > 2 else 'imperceptible'})")
+    return report
+
 
 
 # ---------------------------------------------------------------- capture ---
@@ -1360,6 +1397,7 @@ def capture_loop() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global TARGETS
+    ENV_SNAPSHOT.update(settings_snapshot())   # before the file overlays anything
     load_config_file()
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
     check_ha()
@@ -1411,7 +1449,8 @@ def health():
         "saturation_boost": SATURATION_BOOST,
         "send_mode": SEND_MODE,
         "dry_run": DRY_RUN,
-        "has_frame": bool(latest_data["raw_grid"]),
+        # raw_grid is a numpy array (serialised lazily); bool(array) raises
+        "has_frame": bool(len(latest_data["raw_grid"])) if latest_data["raw_grid"] is not None else False,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "stats": dict(stats),
     }
@@ -1435,6 +1474,10 @@ def get_config():
         "dry_run": DRY_RUN,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "restart_required": [s["name"] for s in SETTINGS if s.get("restart")],
+        "config_exists": CONFIG_PATH.exists(),
+        # values the saved file is overriding, so the UI can say so out loud
+        "env_shadowed": sorted(name for name, value in ENV_SNAPSHOT.items()
+                               if settings_snapshot().get(name) != value),
     }
 
 
@@ -1452,14 +1495,43 @@ def post_config(payload: dict = Body(...)):
                                  if SETTINGS_BY_NAME.get(n, {}).get("restart")]}
 
 
+@app.post("/api/calibrate")
+def post_calibrate():
+    """Measure the first light's real colour accuracy (flashes it for ~7 s)."""
+    if not HA_TOKEN:
+        return JSONResponse({"ok": False, "error": "HA_TOKEN is not set"}, status_code=400)
+    if not CALIBRATION_LOCK.acquire(blocking=False):
+        return JSONResponse({"ok": False, "error": "a calibration is already running"},
+                            status_code=409)
+    entity = TARGETS[0].entity_id if TARGETS else LIGHT_ENTITY_ID
+    stats["calibrating"] = True
+    stats["calibration"] = None
+
+    def run() -> None:
+        try:
+            stats["calibration"] = calibrate(verbose=False)
+        except Exception as exc:                      # keep the flag usable
+            stats["calibration"] = {"ok": False, "error": str(exc)}
+        finally:
+            stats["calibrating"] = False
+            CALIBRATION_LOCK.release()
+
+    threading.Thread(target=run, name="calibrate", daemon=True).start()
+    return {"ok": True, "started": True, "entity": entity}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
     parser.add_argument("--calibrate", action="store_true",
                         help="measure this light's colour accuracy, then restore its state")
     args = parser.parse_args()
     if args.calibrate:
-        TARGETS.extend(parse_light_map(LIGHT_MAP))
-        raise SystemExit(calibrate())
+        load_config_file()
+        TARGETS.extend(parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else ""))
+        report = calibrate()
+        if report["error"]:
+            print("calibration failed: " + report["error"], file=sys.stderr)
+        raise SystemExit(0 if report["ok"] else 1)
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 

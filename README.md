@@ -38,14 +38,33 @@ export HA_TOKEN=eyJ...
 python screen_to_lights.py
 ```
 
-Then open <http://localhost:8000/> — that's the UI. Settings saved there go to
-`config.json` next to the script and are applied live.
+Then open <http://localhost:8000/> — that's the UI (below). Settings saved there go
+to `config.json` next to the script and are applied live; that file outranks the
+environment, and the UI tells you when it is overriding env values.
 
 Windows (PowerShell):
 
 ```powershell
 $env:HA_URL="http://192.168.1.10:8123"; $env:HA_TOKEN="..."; python screen_to_lights.py
 ```
+
+## The settings UI
+
+`GET /` serves a single-file UI — no build step, no dependencies beyond the app itself.
+
+- **Settings**, grouped (Colour · Brightness · Capture · Sending), each with a slider or
+  select and a one-line explanation. Fields that need a restart are tagged `restart`.
+- **Lights**: a row per light with its entity id and a 3×3 zone picker. Add or remove
+  rows; zones are serialised back into `LIGHT_MAP`.
+- **Save & apply** validates everything before touching anything — one bad value
+  rejects the whole request with the reason. **Revert** reloads from the server,
+  **Reset to defaults** rewrites `config.json`.
+- **Live panel**: a row per light showing its current colour chip, hex, brightness and
+  counters; a nine-cell strip of the zone colours (outlined cells are the ones in use);
+  and posts/sec, frame age, prep time, cycle time, pace/transition, busy · stalls ·
+  timeouts, idle state, and the last calibration result.
+- **Calibrate…** runs the twelve-colour accuracy check against the first light from the
+  browser, flashes it for ~7 s, restores it, and reports worst du'v' and dE76.
 
 ## Lights and zones
 
@@ -91,7 +110,8 @@ keeps the zone's overall level.
 | `GET /` | settings UI |
 | `GET /api/config` | current settings + metadata + light list |
 | `POST /api/config` | validate, apply live, persist (`{"settings":{...}}`, or `{"reset":true}`) |
-| `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters |
+| `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
+| `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
 | `GET /regions` | the nine zone colours for the current frame |
 | `GET /raw_grid` | the 64×36 sample grid |
 

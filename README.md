@@ -90,7 +90,10 @@ separate asset, no dependencies beyond the app itself.
   than disabled: the saturation controls appear only when boost is on, and the
   dominant-mode knobs only in dominant mode.
 - **Live panel**: a row per light showing its current colour chip, hex, brightness and
-  counters; a nine-cell strip of the zone colours (outlined cells are the ones in use);
+  counters; a nine-cell strip of the zone colours (outlined cells are the ones in use).
+  Both are the *payload* colour, not the raw screen average — the same transform that
+  builds the service call, dimmed to the brightness being sent, so what you see is what
+  the bulb gets;
   and posts/sec, frame age, prep time, cycle time, pace/transition, busy · stalls ·
   timeouts, idle state, and the last calibration result.
 - **Calibrate…** runs the twelve-colour accuracy check against the first light from the
@@ -116,6 +119,11 @@ Lights that end up with identical colour and brightness are sent in a single ser
 call, so the Zigbee radio isn't asked to do the same work twice. Only the rectangle
 covered by the zones in use is captured at all.
 
+**Monitor** (Capture card, restart to apply) is a list of what the machine actually
+has: `0` combines every monitor onto one canvas, `1` is the primary, `2+` are the rest,
+each labelled with its resolution and position. Multi-monitor setups no longer have to
+guess which index is the screen they're looking at.
+
 ## The colour knobs
 
 | setting | what it does |
@@ -125,7 +133,6 @@ covered by the zones in use is captured at all.
 | `DOMINANT_LUMINANCE` | brightness follows the winning cluster (`cluster`, default) or the whole region (`region`) |
 | `CHROMA_FLOOR` | how colourful a cell must be to vote at all — this is what makes white pages and grey UI stop washing the colour out (default du'v' 0.010) |
 | `HUE_BINS` | dominant mode's hue resolution: 24 = 15° buckets, and the winner is averaged with its two neighbours. Lower merges two similar hues into one steady colour; higher separates them but can flicker between neighbours (default 24) |
-| `DOMINANT_LUMINANCE` | `cluster` = the dominant object's own brightness, `region` = the zone's mean |
 | `SATURATION_BOOST` | off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
 | `BRIGHTNESS_FROM` | `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
 | `BRIGHTNESS_GAMMA` | tone curve on the brightness input |
@@ -163,6 +170,7 @@ footer when it is overriding env values.
 | `GET /api/config` | current settings + metadata + light list |
 | `POST /api/config` | validate and apply (`{"settings":{...}}`, or `{"reset":true}`); `"persist": false` applies without writing `config.json` |
 | `GET /api/lights` | light entities from HA for the picker (30 s cache, `?refresh=1` to bypass) |
+| `GET /api/monitors` | monitors mss can capture, for the Monitor picker (0 = all combined) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
 | `GET /health` | live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |

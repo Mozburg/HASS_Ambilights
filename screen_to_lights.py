@@ -287,7 +287,8 @@ class Target:
     """One light: which zones feed it, plus its own dedupe/telemetry state."""
 
     __slots__ = ("entity_id", "zones", "last_attempted", "last_sent",
-                 "last_success_mono", "posts", "busy", "errors", "zone_label")
+                 "last_success_mono", "last_attempt_mono", "posts", "busy", "errors",
+                 "zone_label")
 
     def __init__(self, entity_id: str, zones: frozenset[int]):
         self.entity_id = entity_id
@@ -295,6 +296,7 @@ class Target:
         self.last_attempted = None
         self.last_sent = None
         self.last_success_mono = 0.0
+        self.last_attempt_mono = 0.0
         self.posts = 0
         self.busy = 0
         self.errors = 0
@@ -700,6 +702,26 @@ function control(meta, value) {
   const wrap = document.createElement("div");
   wrap.className = "ctl";
   const id = `set-${meta.name}`;
+  if (meta.monitors) {
+    const sel = document.createElement("select");
+    sel.id = id;
+    sel.setAttribute("aria-label", meta.label);
+    const options = (MONITORS && MONITORS.ok) ? MONITORS.monitors : [];
+    if (!options.length) {
+      const only = document.createElement("option");
+      only.value = "", only.textContent = "monitor list unavailable - press Save to reload";
+      sel.appendChild(only);
+    }
+    options.forEach((mon) => {
+      const o = document.createElement("option");
+      o.value = mon.index; o.textContent = mon.label;
+      if (String(mon.index) === String(value)) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.onchange = () => { CFG[meta.name] = Number(sel.value); setDirty(true, true); };
+    return sel;
+  }
+
 
   if (meta.type === "bool") {
     const label = document.createElement("label");
@@ -875,6 +897,16 @@ function renderSettings() {
 
 /* ------------------------------------------------------------------ data -- */
 let ENTITIES = null;
+let MONITORS = null;
+
+async function loadMonitors() {
+  try {
+    MONITORS = await fetch("/api/monitors").then((r) => r.json());
+  } catch (e) {
+    MONITORS = { ok: false, monitors: [], detail: e.message };
+  }
+  return MONITORS;
+}
 
 async function loadEntities(force) {
   const note = $("lightsource");
@@ -921,6 +953,7 @@ async function reload() {
   SAVED = data.saved_settings || {};
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
   if (ENTITIES === null) await loadEntities(false);   // first paint only
+  if (MONITORS === null) await loadMonitors();
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
@@ -1068,7 +1101,8 @@ function renderLightLive(health) {
   }
   lights.forEach((l) => {
     const colour = l.colour || null;
-    const hex = colour && colour.xy ? hexFromXy(colour.xy[0], colour.xy[1]) : null;
+    const hex = colour && colour.preview ? colour.preview.hex
+      : (colour && colour.xy ? hexFromXy(colour.xy[0], colour.xy[1]) : null);
     const sent = l.last_sent;
     const block = document.createElement("div");
     block.className = "lightlive";
@@ -1077,7 +1111,8 @@ function renderLightLive(health) {
        <div class="bar">
          <span class="mini" style="background:${hex || "#111"}"></span>
          <span class="meta">${hex || "no frame yet"}
-           ${sent && sent.brightness != null ? "· bri " + sent.brightness : ""}
+           ${colour && colour.preview ? "· bri " + colour.preview.brightness
+             : (sent && sent.brightness != null ? "· bri " + sent.brightness : "")}
            · ${esc((l.zones || []).join(",")) || "all"}</span>
        </div>
        <div class="meta">${l.posts} posts · ${l.busy} busy · ${l.errors} errors</div>`;
@@ -1129,8 +1164,13 @@ async function tick() {
     if (zones && Array.isArray(zones.zones) && zones.zones.length === 9) {
       zones.zones.forEach((z, i) => {
         const cell = zb.children[i];
-        cell.style.background = z && z.xy ? (hexFromXy(z.xy[0], z.xy[1]) || "#222932") : "#222932";
-        cell.title = `zone ${i + 1}` + (z && z.xy ? ` · xy ${z.xy[0]}, ${z.xy[1]}` : " · no data");
+        const p = z && z.preview;
+        const hex = p ? p.hex : (z && z.xy ? hexFromXy(z.xy[0], z.xy[1]) : null);
+        cell.style.background = hex || "#222932";
+        // the swatch is the payload colour at the brightness that gets sent
+        cell.title = `zone ${i + 1}` + (p
+          ? ` · ${p.hex} · brightness ${p.brightness} · xy ${p.xy[0]}, ${p.xy[1]}`
+          : " · no data");
       });
       markUsedZones();
     }
@@ -1256,9 +1296,10 @@ SETTINGS = [
           "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.5, advanced=True),
     _spec("IDLE_AFTER", "int", 3, "Capture", "Idle after",
           "Identical frames before dropping to the idle rate.", min=0, max=60, advanced=True),
-    _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor index",
-          "mss monitor: 0 = all monitors, 1 = primary. Needs a restart.",
-          min=0, max=8, restart=True),
+    _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor",
+          "Which screen to follow: 0 combines every monitor onto one canvas, 1 is "
+          "the primary, 2+ are the others in the order mss reports them. Needs a restart.",
+          min=0, max=8, restart=True, monitors=True),
 
     _spec("TRANSITION", "string", "auto", "Sending", "Transition",
           "'auto' matches the ramp to the achieved post interval; a number (seconds) "
@@ -1766,9 +1807,13 @@ def should_send(target: Target, colour: dict, brightness: int) -> bool:
     d_e = delta_e(colour["rgb"], last[0])
     if d_e >= MIN_DELTA_E or abs(brightness - last[1]) >= MIN_BRIGHTNESS_DELTA:
         return True
-    confirmed = target.last_sent
-    unconfirmed = confirmed is None or delta_e(colour["rgb"], confirmed[0]) >= MIN_DELTA_E
-    return unconfirmed and time.perf_counter() - target.last_success_mono >= RESEND_AFTER
+    # Same colour as the last attempt. Re-send only when that attempt is still
+    # unconfirmed, and never sooner than RESEND_AFTER after the attempt itself:
+    # timing from last_success_mono re-queued every frame while the very first
+    # POST was still in flight (a static screen then posted twice).
+    if target.last_sent == last:
+        return False
+    return time.perf_counter() - target.last_attempt_mono >= RESEND_AFTER
 
 
 def current_transition() -> float:
@@ -1780,11 +1825,31 @@ def current_transition() -> float:
     return max(MIN_TRANSITION, min(MAX_TRANSITION, interval / 1000.0 * 1.15))
 
 
+def preview_colour(colour: dict) -> dict:
+    """What the bulb will actually show: the same transform the payload uses.
+
+    The UI draws the 3x3 grid and the per-light chips from this, so what you see
+    is the post-boost, post-clamp colour at the brightness that gets sent - not
+    the raw average of the screen.
+    """
+    xy, k = boost_saturation(tuple(colour["xy"]), colour["luminance"])
+    brightness = brightness_for_colour(colour) if SEND_BRIGHTNESS else 255
+    rgb = srgb_from_xy(xy, max(brightness / 255.0, 1e-4))
+    return {
+        "xy": [round(xy[0], 4), round(xy[1], 4)],
+        "brightness": brightness,
+        "rgb": list(rgb),
+        "hex": "#%02x%02x%02x" % tuple(rgb),
+        "saturation_k": round(k, 2),
+    }
+
+
 def build_payload(colour: dict) -> dict:
     """Service data for one light (no entity_id, so identical ones can merge)."""
     payload: dict = {}
-    xy, k = boost_saturation(tuple(colour["xy"]), colour["luminance"])
-    stats["saturation_k"] = round(k, 2)
+    preview = preview_colour(colour)
+    xy = tuple(preview["xy"])
+    stats["saturation_k"] = preview["saturation_k"]
     if SEND_MODE == "rgb":
         rgb = srgb_from_xy(xy, max(colour["luminance"], 1e-4))
         peak = max(max(rgb), 1)          # HA reads chromaticity from rgb_color
@@ -1792,7 +1857,7 @@ def build_payload(colour: dict) -> dict:
     else:
         payload["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
     if SEND_BRIGHTNESS:
-        payload["brightness"] = brightness_for_colour(colour)
+        payload["brightness"] = preview["brightness"]
     transition = current_transition()
     if transition > 0:
         payload["transition"] = round(transition, 2)
@@ -2061,6 +2126,8 @@ def sender_loop() -> None:
                     target = by_entity.get(entity)
                     if target is not None:
                         target.busy += 1
+                        # definitely not applied: let the next frame retry at once
+                        target.last_attempted = target.last_sent
                 pace = min(POST_INTERVAL_CEILING, pace * 1.3)
                 now = time.time()
                 if now - _last_error_log > 30:
@@ -2081,6 +2148,7 @@ def sender_loop() -> None:
                     target = by_entity.get(entity)
                     if target is not None:
                         target.errors += 1
+                        target.last_attempted = target.last_sent   # refused: retry freely
                 note_failure()
                 now = time.time()
                 if now - _last_error_log > 30:
@@ -2364,9 +2432,10 @@ def capture_loop() -> None:
             measured_at = time.perf_counter()
             zone_cells = zones_cells(lin)
 
+            zone_colours = [aggregate(c) for c in zone_cells]
             regions = {
-                "zones": [aggregate(c) for c in zone_cells],
-                "full": aggregate(lin),
+                "zones": [dict(c, preview=preview_colour(c)) for c in zone_colours],
+                "full": dict(aggregate(lin), preview=preview_colour(aggregate(lin))),
             }
             batch: dict[str, dict] = {}
             light_report: dict[str, dict] = {}
@@ -2377,6 +2446,7 @@ def capture_loop() -> None:
                     colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
                     colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
                 colour["measured_at"] = measured_at
+                colour["preview"] = preview_colour(colour)
                 light_report[target.entity_id] = colour
                 brightness = brightness_for_colour(colour)
                 if should_send(target, colour, brightness):
@@ -2384,6 +2454,7 @@ def capture_loop() -> None:
                     # record it now: the sender may not post for a few ms, and
                     # dedupe has to hold for that window too
                     target.last_attempted = (tuple(colour["rgb"]), brightness)
+                    target.last_attempt_mono = time.perf_counter()
 
             with state_lock:
                 latest_data["raw_grid"] = grid        # serialised on request only
@@ -2481,6 +2552,27 @@ def index_page():
 PERSISTED = {}
 LIGHTS_CACHE = {"at": 0.0, "data": None}
 LIGHTS_CACHE_TTL = 30.0
+
+
+@app.get("/api/monitors")
+def get_monitors():
+    """Monitors this machine can capture, for the picker (0 = all combined)."""
+    try:
+        with mss() as sct:
+            monitors = list(sct.monitors)
+    except Exception as exc:                       # headless, no permission
+        return {"ok": False, "monitors": [], "detail": str(exc)}
+    out = []
+    for index, mon in enumerate(monitors):
+        if index == 0:
+            out.append({"index": 0, "label": "All monitors combined (%dx%d)"
+                        % (mon.get("width", 0), mon.get("height", 0))})
+            continue
+        out.append({"index": index, "label": "Monitor %d (%dx%d at %d,%d)%s" % (
+            index, mon.get("width", 0), mon.get("height", 0),
+            mon.get("left", 0), mon.get("top", 0),
+            " - primary" if index == 1 else "")})
+    return {"ok": True, "count": len(out), "monitors": out}
 
 
 @app.get("/api/lights")

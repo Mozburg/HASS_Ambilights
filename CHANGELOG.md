@@ -8,6 +8,19 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-11-10
+
+### Added
+- **Close to tray.** Closing the window hides it and keeps mirroring; the tray icon
+  reopens it (*Open settings*) or quits for real. On by default in the desktop app, with a
+  *Close to tray* switch in the Server card for anyone who wants closing to mean quitting.
+  Without a tray backend the close goes through as before.
+- **Zone grids beyond 3×3.** `ZONE_ROWS` / `ZONE_COLS` (Capture card, up to 8×8) split the
+  screen into any number of zones. Zone buttons, the live strip and `/regions` all follow
+  the configured grid, and zone numbers still read left to right, top to bottom.
+  Shrinking the grid is refused — with a reason — while a light is mapped to a zone the
+  smaller grid would not have.
+
 ## [2.1.1] — 2026-11-10
 
 ### Removed

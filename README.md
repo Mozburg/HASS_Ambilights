@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.1.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.2.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -28,8 +28,11 @@ web UI for every knob, and a colour pipeline that actually matches the panel.
 ### Windows
 
 Download `HassAmbilights.exe` from the [latest release](../../releases/latest) and run it.
-It opens a window with the settings page; closing the window quits. It is unsigned, so
-Windows SmartScreen shows "unknown publisher" the first time — *More info → Run anyway*.
+It opens a window with the settings page. **Closing the window hides it to the tray** and
+mirroring carries on — use the tray icon to reopen it or quit for real. Turn off
+*Close to tray* in the Server card if you would rather closing quit the app. It is
+unsigned, so Windows SmartScreen shows "unknown publisher" the first time —
+*More info → Run anyway*.
 
 - Settings live in `%APPDATA%\HassAmbilights`, logs in `%LOCALAPPDATA%\HassAmbilights\logs`.
 - **Start with Windows** (Server card) adds a login entry that launches it in the tray;
@@ -158,6 +161,7 @@ guess which index is the screen they're looking at.
 | `BRIGHTNESS_FROM` | `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
 | `BRIGHTNESS_GAMMA` | tone curve on the brightness input |
 | `SEND_MODE` | `xy` (default, precise) or legacy `rgb` |
+| `ZONE_ROWS`, `ZONE_COLS` | how many zones the screen is split into (default 3 × 3). Up to 8 × 8, so a wide desk can be 5 × 3 and a wall of spotlights 4 × 4. Zones are numbered in reading order; shrinking the grid is refused while a light's mapping still uses a zone that no longer exists |
 
 Rule of thumb: a white page holding one vivid photo is a pale wash under `mean` and
 the photo's colour under `dominant`. `DOMINANT_MIX` decides how far you travel, and

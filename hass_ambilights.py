@@ -187,7 +187,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.1.1"
+__version__ = "2.2.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -404,8 +404,8 @@ class Target:
 
 def parse_zones(text: str) -> frozenset[int]:
     text = (text or "").strip().lower()
-    if text in ("", "all", "*", "1-9"):
-        return frozenset(range(1, 10))
+    if text in ("", "all", "*") or text == f"1-{ZONE_COUNT}":
+        return frozenset(range(1, ZONE_COUNT + 1))
     zones: set[int] = set()
     for part in text.replace(" ", "").split(","):
         if not part:
@@ -415,16 +415,16 @@ def parse_zones(text: str) -> frozenset[int]:
             zones.update(range(int(low), int(high) + 1))
         else:
             zones.add(int(part))
-    bad = sorted(z for z in zones if not 1 <= z <= 9)
+    bad = sorted(z for z in zones if not 1 <= z <= ZONE_COUNT)
     if bad:
-        raise ValueError(f"zones out of range 1-9: {bad}")
+        raise ValueError(f"zones out of range 1-{ZONE_COUNT}: {bad}")
     return frozenset(zones)
 
 
 def parse_light_map(spec: str) -> list[Target]:
     spec = (spec or "").strip()
     if not spec:
-        return [Target(LIGHT_ENTITY_ID, frozenset(range(1, 10)))]
+        return [Target(LIGHT_ENTITY_ID, frozenset(range(1, ZONE_COUNT + 1)))]
     targets: list[Target] = []
     for chunk in spec.split(";"):
         chunk = chunk.strip()
@@ -440,14 +440,28 @@ def parse_light_map(spec: str) -> list[Target]:
     return targets
 
 
-def _build_zone_index(width: int, height: int):
-    """(row_idx, col_idx) per zone, 1..9 in reading order, third splits exact."""
-    rows = np.array_split(np.arange(height), 3)
-    cols = np.array_split(np.arange(width), 3)
-    return [(r, c) for r in rows for c in cols]
+ZONE_ROWS = int(_env("ZONE_ROWS", "3"))
+ZONE_COLS = int(_env("ZONE_COLS", "3"))
 
 
-ZONE_INDEX = _build_zone_index(*GRID_SIZE)
+def _build_zone_index(width: int, height: int, rows: int = 3, cols: int = 3):
+    """(row_idx, col_idx) per zone, reading order, splits as even as possible."""
+    row_blocks = np.array_split(np.arange(height), max(1, rows))
+    col_blocks = np.array_split(np.arange(width), max(1, cols))
+    return [(r, c) for r in row_blocks for c in col_blocks]
+
+
+def rebuild_zone_index() -> int:
+    """Re-split the grid for the configured rows/cols. Returns the zone count."""
+    global ZONE_INDEX, ZONE_COUNT
+    ZONE_INDEX = _build_zone_index(GRID_SIZE[0], GRID_SIZE[1], ZONE_ROWS, ZONE_COLS)
+    ZONE_COUNT = len(ZONE_INDEX)
+    return ZONE_COUNT
+
+
+ZONE_INDEX: list = []
+ZONE_COUNT = ZONE_ROWS * ZONE_COLS
+rebuild_zone_index()
 
 
 # --------------------------------------------------------------- settings ----
@@ -561,7 +575,7 @@ UI_HTML = r"""<!DOCTYPE html>
     padding:10px;border:1px solid var(--line);border-radius:9px;margin-bottom:10px;background:var(--panel2)}
   .light:hover{border-color:#3d4b5c}
   .chip{width:34px;height:34px;border-radius:8px;border:1px solid var(--line);flex:none}
-  .zones{display:grid;grid-template-columns:repeat(3,26px);grid-template-rows:repeat(3,26px);gap:3px}
+  .zones{display:grid;gap:3px;grid-template-columns:repeat(var(--zone-cols,3),26px)}
   .zones button{background:#222932;border:1px solid var(--line);border-radius:5px;color:var(--muted);
     font-size:11px;cursor:pointer;padding:0}
   .zones button.on{background:var(--accent);border-color:var(--accent);color:#0d1117;font-weight:700}
@@ -583,7 +597,7 @@ UI_HTML = r"""<!DOCTYPE html>
   .kv:first-child{border-top:0}
   .kv b{font-weight:500;color:var(--muted)}
   .kv span{font-variant-numeric:tabular-nums}
-  .zonebits{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;margin:8px 0}
+  .zonebits{display:grid;grid-template-columns:repeat(var(--zone-cols,3),1fr);gap:3px;margin:8px 0}
   .zonebits div{height:16px;border-radius:3px;background:#222932;position:relative}
   .zonebits div.used{box-shadow:inset 0 0 0 1px var(--accent)}
   .lightlive{padding:8px 0;border-top:1px dashed rgba(255,255,255,.06)}
@@ -672,6 +686,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
+let ZONE_ROWS = 3, ZONE_COLS = 3, ZONE_COUNT = 9;
 let META = [], CFG = {}, LIGHTS = [], dirty = false, lastPosts = null, lastPostT = null, rate = 0;
 let LASTCONFIG = null;
 let SAVED = {};               // what is on disk, for Revert and the badge
@@ -723,7 +738,7 @@ const serializeMap = (list) => list
   .filter((l) => l.entity.trim())
   .map((l) => {
     const z = [...l.zones].sort((a, b) => a - b);
-    return l.entity.trim() + "=" + (z.length === 9 ? "all" : (z.join(",") || "all"));
+    return l.entity.trim() + "=" + (z.length === ZONE_COUNT ? "all" : (z.join(",") || "all"));
   }).join("; ");
 
 function renderLights() {
@@ -771,9 +786,10 @@ function renderLights() {
 
     const zones = document.createElement("div");
     zones.className = "zones";
+    zones.style.setProperty("--zone-cols", ZONE_COLS);
     zones.setAttribute("role", "group");
     zones.setAttribute("aria-label", `Light ${i + 1} zones`);
-    for (let z = 1; z <= 9; z++) {
+    for (let z = 1; z <= ZONE_COUNT; z++) {
       const b = document.createElement("button");
       b.type = "button";
       b.textContent = z;
@@ -810,7 +826,7 @@ function renderLights() {
 }
 
 function addLight() {
-  LIGHTS.push({ entity: "", zones: new Set([1, 2, 3, 4, 5, 6, 7, 8, 9]) });
+  LIGHTS.push({ entity: "", zones: new Set(Array.from({length: ZONE_COUNT}, (_, i) => i + 1)) });
   setDirty(true, true);
   renderLights();
 }
@@ -1083,6 +1099,11 @@ async function reload() {
   $("loaderror").innerHTML = "";
   META = data.meta;
   CFG = data.settings;
+  if (Array.isArray(data.zone_grid)) {
+    ZONE_ROWS = data.zone_grid[0];
+    ZONE_COLS = data.zone_grid[1];
+    ZONE_COUNT = data.zone_count || ZONE_ROWS * ZONE_COLS;
+  }
   SAVED = data.saved_settings || {};
   LIGHTS = parseMap(CFG.LIGHT_MAP || "");
   if (ENTITIES === null) await loadEntities(false);   // first paint only
@@ -1351,16 +1372,17 @@ async function tick() {
 
     const zones = await fetch("/regions").then((r) => r.json()).catch(() => null);
     const zb = $("zonebits");
-    if (zb.children.length !== 9) {           // draw the grid before the first frame
+    zb.style.setProperty("--zone-cols", ZONE_COLS);
+    if (zb.children.length !== ZONE_COUNT) {   // draw the grid before the first frame
       zb.innerHTML = "";
-      for (let i = 1; i <= 9; i++) {
+      for (let i = 1; i <= ZONE_COUNT; i++) {
         const d = document.createElement("div");
         d.title = `zone ${i}`;
         zb.appendChild(d);
       }
       markUsedZones();
     }
-    if (zones && Array.isArray(zones.zones) && zones.zones.length === 9) {
+    if (zones && Array.isArray(zones.zones) && zones.zones.length === ZONE_COUNT) {
       zones.zones.forEach((z, i) => {
         const cell = zb.children[i];
         const p = z && z.preview;
@@ -1523,6 +1545,13 @@ SETTINGS = [
           "Tone curve on the 0-1 input: <1 lifts dim frames, >1 crushes them.",
           min=0.3, max=2.5, step=0.05),
 
+    _spec("ZONE_ROWS", "int", 3, "Capture", "Zone rows",
+          "How many rows the screen is split into. Changing this re-splits every "
+          "light's zones, so a mapping that uses zones beyond the new grid is rejected.",
+          min=1, max=8),
+    _spec("ZONE_COLS", "int", 3, "Capture", "Zone columns",
+          "How many columns the screen is split into (3x3 by default, up to 8x8).",
+          min=1, max=8),
     _spec("CAPTURE_FPS", "float", 12.0, "Capture", "Capture rate",
           "Screen samples per second. Sends are paced separately.",
           min=1.0, max=60.0, step=1.0),
@@ -1576,6 +1605,9 @@ SETTINGS.extend([
     _spec("BIND_HOST", "string", "127.0.0.1", "Server", "Listen address",
           "Interface for the settings UI. 127.0.0.1 = this machine only; 0.0.0.0 = anyone "
           "who can reach the port, and the UI has no login. Needs a restart.", restart=True),
+    _spec("CLOSE_TO_TRAY", "bool", True, "Server", "Close to tray",
+          "Closing the window hides it and keeps mirroring; use the tray icon to "
+          "reopen it or quit. Turn off to quit when the window closes."),
     _spec("START_WITH_WINDOWS", "bool", False, "Server", "Start with Windows",
           "Adds a login entry that starts the app in the tray. Windows only; takes "
           "effect as soon as you save.",),
@@ -1626,6 +1658,7 @@ def _env_bind_port() -> int:
     return port
 
 
+CLOSE_TO_TRAY = _env("CLOSE_TO_TRAY", "1") == "1"
 BIND_HOST = _env_bind_host()
 BIND_PORT = _env_bind_port()
 SECRET_SET = "<set>"
@@ -1751,6 +1784,16 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
             new[name] = _coerce(spec, raw)
         except (TypeError, ValueError) as exc:
             errors.append(f"{name}: {exc}")
+    if {"ZONE_ROWS", "ZONE_COLS"} & set(new):
+        rows = int(new.get("ZONE_ROWS", ZONE_ROWS))
+        cols = int(new.get("ZONE_COLS", ZONE_COLS))
+        limit = rows * cols
+        overflow = sorted({z for t in TARGETS for z in t.zones if z > limit})
+        if overflow:
+            errors.append(f"ZONE_ROWS/ZONE_COLS: {limit} zones, but the light mapping "
+                          f"uses zone {max(overflow)} - change the mapping first")
+            new.pop("ZONE_ROWS", None)
+            new.pop("ZONE_COLS", None)
     if "TRANSITION" in new:
         raw = str(new["TRANSITION"]).strip()
         if raw.lower() == "auto":
@@ -1803,6 +1846,11 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
         AUTOSTART_RESULT.clear()
         AUTOSTART_RESULT.update({"ok": ok, "detail": message})
         log.info("autostart: %s", message)
+    if {"ZONE_ROWS", "ZONE_COLS"} & set(new):
+        rebuild_zone_index()
+        if isinstance(LIGHT_MAP, str) and LIGHT_MAP:
+            TARGETS = parse_light_map(LIGHT_MAP)
+        GEOMETRY_REV += 1
     if token_changed:
         persist_secrets()
     if {"HA_URL", "HA_TOKEN"} & set(new):
@@ -2121,7 +2169,7 @@ def zones_cells(lin: np.ndarray) -> list[np.ndarray]:
 
 
 def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> np.ndarray:
-    if len(target.zones) == 9:
+    if len(target.zones) == ZONE_COUNT:
         return lin.reshape(-1, 3)
     return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
 
@@ -3151,6 +3199,8 @@ def get_regions():
 def health():
     return {
         "version": __version__,
+        "zone_grid": [ZONE_ROWS, ZONE_COLS],
+        "zone_count": ZONE_COUNT,
         "ha_url": HA_URL,
         "fps": CAPTURE_FPS,
         "capture_stride": CAPTURE_STRIDE,
@@ -3272,6 +3322,8 @@ def get_config():
         "ha_token_set": bool(HA_TOKEN),
         # what a Save would write: lets Revert restore the file, and lets a
         # page load say "these values are live but unsaved"
+        "zone_grid": [ZONE_ROWS, ZONE_COLS],
+        "zone_count": ZONE_COUNT,
         "saved_settings": dict(PERSISTED) if PERSISTED else settings_snapshot(),
         "unsaved": bool(PERSISTED) and PERSISTED != settings_snapshot(),
         "secrets_path": str(SECRETS_PATH),
@@ -3469,8 +3521,74 @@ def wait_for_server(url: str, timeout: float = 15.0) -> bool:
     return False
 
 
-def run_window(url: str) -> int:
-    """The UI in a native window. Closing it ends the app."""
+TRAY_ICON: dict = {}
+
+
+def _hide_instead_of_close(window) -> bool:
+    """Cancel the close and hide. Returning False is how pywebview vetoes it."""
+    try:
+        window.hide()
+    except Exception as exc:                  # no window backend: let it close
+        log.debug("could not hide the window: %s", exc)
+        return True
+    log.info("window hidden - still running in the tray")
+    return False
+
+
+def build_tray(on_show, on_quit, label: str = "Hass Ambilights"):
+    """Create the tray icon without starting it, or None if pystray is missing."""
+    try:
+        import pystray
+    except ImportError:
+        log.warning("pystray is not installed - no tray icon")
+        return None
+    icon = pystray.Icon(
+        "hass_ambilights", tray_icon_image(), label,
+        menu=pystray.Menu(pystray.MenuItem("Open settings", on_show, default=True),
+                          pystray.MenuItem("Quit", on_quit)))
+    TRAY_ICON["icon"] = icon
+    return icon
+
+
+def run_tray_detached(icon) -> None:
+    """Run a tray icon without owning the main thread (Windows message loop)."""
+    if hasattr(icon, "run_detached"):
+        try:
+            icon.run_detached()
+            return
+        except Exception as exc:
+            log.debug("run_detached failed (%s), using a thread", exc)
+    threading.Thread(target=icon.run, name="tray", daemon=True).start()
+
+
+def start_tray_for_window(window, url: str) -> None:
+    """A tray icon that can bring the hidden window back, or quit for real."""
+    import webbrowser
+
+    def show_settings(_icon=None, _item=None):
+        try:
+            window.show()
+        except Exception:
+            webbrowser.open(url)
+
+    def quit_app(_icon=None, _item=None):
+        icon = TRAY_ICON.get("icon")
+        if icon is not None:
+            icon.stop()
+        try:
+            window.destroy()
+        except Exception:
+            pass
+
+    icon = build_tray(show_settings, quit_app)
+    if icon is not None:
+        run_tray_detached(icon)
+
+
+def run_window(url: str, close_to_tray: bool | None = None) -> int:
+    """The UI in a native window; with CLOSE_TO_TRAY, closing hides it."""
+    if close_to_tray is None:
+        close_to_tray = CLOSE_TO_TRAY
     try:
         import webview
     except ImportError:
@@ -3483,8 +3601,11 @@ def run_window(url: str) -> int:
                 time.sleep(1)
         except KeyboardInterrupt:
             return 0
-    webview.create_window("Hass Ambilights", url, width=1180, height=840,
-                          min_size=(900, 600))
+    window = webview.create_window("Hass Ambilights", url, width=1180, height=840,
+                                   min_size=(900, 600))
+    if close_to_tray:
+        start_tray_for_window(window, url)
+        window.events.closing += lambda: _hide_instead_of_close(window)
     webview.start()
     return 0
 
@@ -3503,19 +3624,21 @@ def run_tray(url: str) -> int:
 
     import webbrowser
 
-    icon = None
-
     def open_settings(_icon=None, _item=None):
         webbrowser.open(url)
 
     def quit_app(_icon=None, _item=None):
+        icon = TRAY_ICON.get("icon")
         if icon is not None:
             icon.stop()
 
-    icon = pystray.Icon(
-        "hass_ambilights", tray_icon_image(), "Hass Ambilights",
-        menu=pystray.Menu(pystray.MenuItem("Open settings", open_settings, default=True),
-                          pystray.MenuItem("Quit", quit_app)))
+    icon = build_tray(open_settings, quit_app)
+    if icon is None:
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            return 0
     icon.run()
     return 0
 

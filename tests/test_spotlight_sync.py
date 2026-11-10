@@ -618,10 +618,71 @@ for bad in ("http://0.0.0.0:8000", "0.0.0.0/ui", ""):
     assert errors, f"{bad!r} should be rejected"
     assert m.BIND_HOST == "0.0.0.0", "a rejected value must not be applied"
 applied, errors = m.apply_settings({"BIND_PORT": "99999"})
-assert m.BIND_PORT == 65535, m.BIND_PORT            # clamped, not crashed
+assert errors and m.BIND_PORT == 9000, (errors, m.BIND_PORT)   # rejected, not clamped
 m.BIND_HOST, m.BIND_PORT = _orig_bind
-m.BIND_HOST, m.BIND_PORT = _orig_bind
-print("bind ok: loopback default, URL rejected, port clamped, restart-tagged")
+print("bind ok: loopback default, URL rejected, port out of range rejected, restart-tagged")
+
+# --- input validation: never convert a bad value silently ------------------
+_keep = {n: getattr(m, n) for n in ("DRY_RUN", "TRANSITION", "CAPTURE_FPS", "HUE_BINS",
+                                    "COLOR_ALGO", "HA_URL")}
+m.DRY_RUN = True
+applied, errors = m.apply_settings({"DRY_RUN": None})
+assert errors and m.DRY_RUN is True, (errors, m.DRY_RUN)      # a null must not disarm it
+assert m.apply_settings({"CAPTURE_FPS": True})[1], "a bool is not a number"
+assert m.apply_settings({"HUE_BINS": float("inf")})[1], "inf must be rejected"
+assert m.apply_settings({"CAPTURE_FPS": 9999})[1], "out of range must be rejected, not clamped"
+assert m.apply_settings({"COLOR_ALGO": "nope"})[1], "bad enum must be rejected"
+_orig_url_test = m.HA_URL
+assert m.apply_settings({"TRANSITION": 0.4})[0].get("TRANSITION") == "0.4", "strings may stringify"
+m.HA_URL = _orig_url_test
+for bad_flag in ("yes please", 5, [], 1.5):
+    _r = m.post_config({"persist": bad_flag})
+    assert getattr(_r, "status_code", 200) == 400, (bad_flag, _r)
+_r = m.post_config({"reset": "false"})          # literal "false" means false
+assert _r.get("ok") is True and _r.get("applied") == {}, ("string false must not reset", _r)
+_p = m.post_config([1, 2, 3])
+assert getattr(_p, "status_code", 400) == 400 and b"payload must be an object" in _p.body
+_p = m.post_config({"COLOR_ALGO": "mean", "persist": False})
+assert _p.get("ok") is True, ("flat body with a control flag", _p)
+assert m.COLOR_ALGO == "mean"
+_p = m.post_config({"settings": {"COLOR_ALGO": "dominant"}, "persist": "no"})
+assert _p.get("ok") is True and _p.get("persisted") is False, _p
+for _n, _v in _keep.items():
+    setattr(m, _n, _v)                      # leave the process as this phase found it
+# an index that doesn't exist must be reported, not silently swapped
+_mons = [{}, {"left": 0, "top": 0, "width": 64, "height": 36},
+         {"left": 64, "top": 0, "width": 64, "height": 36}]
+_i, _w = m.pick_monitor(_mons, 7)
+assert _i == 1 and _w and "2 monitor(s)" in _w, (_i, _w)
+_i, _w = m.pick_monitor([_mons[0], _mons[1]], 7)
+assert _i == 1 and "1 monitor(s)" in _w, (_i, _w)
+assert m.pick_monitor(_mons, 2) == (2, None)
+assert m.pick_monitor(_mons, 0) == (0, None)
+print("monitor choice ok: bad index reported with the real count")
+
+# /api/monitors: count means screens, index 0 is the synthetic canvas
+_m = m.get_monitors()
+if _m["ok"]:
+    assert _m["count"] == len(_m["monitors"]) - 1, _m
+    assert _m["choices"] == len(_m["monitors"])
+    assert _m["monitors"][0]["index"] == 0
+
+# a new token is reported as applied (masked) and probed, and the picker cache dies
+_keep_token = m.HA_TOKEN
+_r = m.post_config({"settings": {"HA_TOKEN": "tok-rotate"}, "persist": False})
+assert _r["applied"].get("HA_TOKEN") == "<set>", _r["applied"]
+assert "tok-rotate" not in _json.dumps(_r), "token leaked in the save response"
+assert (_r.get("connection") or {}).get("detail") != "unchanged", "a new token must be probed"
+m.HA_TOKEN = _keep_token
+
+m.LIGHTS_CACHE.update({"at": 1e9, "data": {"ok": True, "count": 1, "lights": []}})
+_keep_url = m.HA_URL
+m.apply_settings({"HA_URL": "http://127.0.0.1:9"}, persist=False)
+assert m.LIGHTS_CACHE["data"] is None, "changing HA_URL must invalidate the light list"
+m.HA_URL = _keep_url
+print("credentials/cache ok: token rotation reported+probed, cache invalidated")
+
+print("validation ok: nulls/bools/inf/out-of-range rejected, control flags literal")
 
 # --- zones that span ragged 3x3 splits (64 -> 22/21/21 columns) ------------
 _grid = np.zeros((m.GRID_SIZE[1], m.GRID_SIZE[0], 3), dtype=np.float32)   # 64x36

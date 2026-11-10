@@ -168,7 +168,7 @@ footer when it is overriding env values.
 |---|---|
 | `GET /` | settings UI |
 | `GET /api/config` | current settings + metadata + light list |
-| `POST /api/config` | validate and apply (`{"settings":{...}}`, or `{"reset":true}`); `"persist": false` applies without writing `config.json` |
+| `POST /api/config` | validate and apply (`{"settings":{...}}`, or `{"reset":true}`); `"persist": false` applies without writing `config.json`. Values are type- and range-checked: a null, a bool where a number belongs, `inf`, an unknown enum or an out-of-range number is a `400` naming the setting, and nothing is applied |
 | `GET /api/lights` | light entities from HA for the picker (30 s cache, `?refresh=1` to bypass) |
 | `GET /api/monitors` | monitors mss can capture, for the Monitor picker (0 = all combined) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |

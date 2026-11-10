@@ -52,6 +52,8 @@ Endpoints: GET /  GET /api/config  GET /health  GET /regions  GET /raw_grid
 import argparse
 import json
 import logging
+import math
+from typing import Any
 import os
 import sys
 import threading
@@ -969,6 +971,7 @@ function applyLive() {
   clearTimeout(liveTimer);
   liveTimer = setTimeout(async () => {
     const seq = ++liveSeq;
+    CFG.LIGHT_MAP = serializeMap(LIGHTS);      // lights/zones are live too
     const settings = {};
     Object.keys(CFG).forEach((k) => { if (!NOT_LIVE.includes(k)) settings[k] = CFG[k]; });
     try {
@@ -1357,7 +1360,18 @@ SECRET_SET = "<set>"
 SECRET_UNSET = "<unset>"
 
 
+TRUEISH = {"true", "1", "yes", "on"}
+FALSEISH = {"false", "0", "no", "off"}
+
+
 def _coerce(spec, value):
+    """Type-check, range-check, then accept. Never guess at a bad value.
+
+    A JSON null used to become False (so DRY_RUN could be switched off by a
+    null), a bool became 1.0, and out-of-range numbers were clamped and reported
+    as applied. Silent conversion is how a safety switch flips without anyone
+    meaning it to.
+    """
     kind = spec["type"]
     if kind == "enum":
         if value not in spec["values"]:
@@ -1368,19 +1382,26 @@ def _coerce(spec, value):
     if kind == "bool":
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in ("1", "true", "yes", "on")
-    if kind == "int":
-        out = int(round(float(value)))
-    elif kind == "float":
-        out = float(value)
-    else:
-        out = "" if value is None else str(value)
+        if isinstance(value, str) and value.strip().lower() in TRUEISH | FALSEISH:
+            return value.strip().lower() in TRUEISH
+        raise ValueError("must be true or false")
     if kind in ("int", "float"):
-        if "min" in spec:
-            out = max(spec["min"], out)
-        if "max" in spec:
-            out = min(spec["max"], out)
-    return out
+        if isinstance(value, bool) or value is None:
+            raise ValueError("must be a number")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("must be a number") from None
+        if not math.isfinite(number):
+            raise ValueError("must be a finite number")
+        out = int(round(number)) if kind == "int" else number
+        low, high = spec.get("min"), spec.get("max")
+        if low is not None and out < low:
+            raise ValueError(f"must be at least {low}")
+        if high is not None and out > high:
+            raise ValueError(f"must be at most {high}")
+        return out
+    return "" if value is None else str(value)
 
 
 def settings_snapshot() -> dict:
@@ -1491,6 +1512,9 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
         globals()[name] = value
     if token_changed:
         persist_secrets()
+    if {"HA_URL", "HA_TOKEN"} & set(new):
+        # the picker must not keep serving the previous instance's lights
+        LIGHTS_CACHE.update({"at": 0.0, "data": None})
     if "LIGHT_MAP" in new:
         TARGETS = parse_light_map(new["LIGHT_MAP"])
         GEOMETRY_REV += 1
@@ -2315,6 +2339,21 @@ def calibrate(verbose: bool = True) -> dict:
 
 
 # ---------------------------------------------------------------- capture ---
+def pick_monitor(monitors: list, wanted: int) -> tuple[int, str | None]:
+    """Choose a monitor that exists, and say so when the configured one doesn't.
+
+    monitors[0] is mss's synthetic "all screens" canvas, so a machine with two
+    screens reports three entries and only 1..2 are real.
+    """
+    screens = max(0, len(monitors) - 1)
+    if 0 <= wanted < len(monitors):
+        return wanted, None
+    used = 1 if screens >= 1 else 0
+    return used, (f"MONITOR_INDEX {wanted} does not exist: this machine reports "
+                  f"{screens} monitor(s) (0 = all combined), so monitor {used} "
+                  f"is being captured instead")
+
+
 def capture_geometry(monitor: dict, targets: list["Target"]) -> tuple[dict, tuple[int, int, int, int], tuple[int, int]]:
     """Grab only the rectangle the lights actually read.
 
@@ -2385,10 +2424,9 @@ def capture_loop() -> None:
         return
 
     monitors = grabber.monitors
-    index = MONITOR_INDEX if 0 <= MONITOR_INDEX < len(monitors) else 1
-    if index >= len(monitors):
-        log.error("MONITOR_INDEX %s out of range (%s monitors), using 0", MONITOR_INDEX, len(monitors) - 1)
-        index = 0
+    index, warning = pick_monitor(monitors, MONITOR_INDEX)
+    if warning:
+        log.error(warning)
     monitor = monitors[index]
     seen_rev = -1                                 # geometry is built on the first pass
     grab_rect = grid_zeros = cell_size = None
@@ -2586,7 +2624,8 @@ def get_monitors():
             index, mon.get("width", 0), mon.get("height", 0),
             mon.get("left", 0), mon.get("top", 0),
             " - primary" if index == 1 else "")})
-    return {"ok": True, "count": len(out), "monitors": out}
+    # count is monitors, not choices: index 0 is a synthetic combined canvas
+    return {"ok": True, "count": len(out) - 1, "choices": len(out), "monitors": out}
 
 
 @app.get("/api/lights")
@@ -2685,24 +2724,64 @@ def post_test_connection(payload: dict = Body(default={})):
     return {"ok": False, "detail": f"HTTP {response.status_code}"}
 
 
+def _control_flag(payload: dict, key: str) -> tuple[bool, str | None]:
+    """Only literal booleans (or "true"/"false" strings) count as true.
+
+    `bool("false")` is True, which used to mean a client sending the string
+    "false" reset every setting or wrote config.json when it asked not to.
+    """
+    if key not in payload or payload[key] is None:
+        return False, None
+    value = payload[key]
+    if isinstance(value, bool):
+        return value, None
+    if isinstance(value, str) and value.strip().lower() in TRUEISH | FALSEISH:
+        return value.strip().lower() in TRUEISH, None
+    return False, f"{key}: must be true or false"
+
+
 @app.post("/api/config")
-def post_config(payload: dict = Body(...)):
+def post_config(payload: Any = Body(...)):
     """Save settings. Validated as a whole: nothing is applied on any error."""
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "errors": ["payload must be an object"]},
+                            status_code=400)
     before = settings_snapshot()
-    persist = bool(payload.get("persist", True))
-    if payload.get("reset"):
+    before_token = HA_TOKEN
+    persist = True
+    for flag in ("reset", "persist"):
+        if flag in payload:
+            value, problem = _control_flag(payload, flag)
+            if problem:
+                return JSONResponse({"ok": False, "errors": [problem]}, status_code=400)
+            if flag == "persist":
+                persist = value
+            reset = value
+    reset = locals().get("reset", False)
+    # a flat body is fine, but its control keys are ours, not settings
+    settings = payload.get("settings", {k: v for k, v in payload.items()
+                                        if k not in ("reset", "persist", "settings")})
+    if not isinstance(settings, dict):
+        return JSONResponse({"ok": False, "errors": ["settings must be an object"]},
+                            status_code=400)
+    if reset:
         applied, errors = apply_settings({s["name"]: s["default"] for s in SETTINGS},
                                          persist=persist)
     else:
-        applied, errors = apply_settings(payload.get("settings", payload), persist=persist)
+        applied, errors = apply_settings(settings, persist=persist)
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=400)
     # the UI posts every setting, so report what actually changed rather than
     # telling the user to restart for knobs they never touched
     after = settings_snapshot()
     changed_names = [name for name in applied if str(before.get(name)) != str(after.get(name))]
+    if HA_TOKEN != before_token:
+        changed_names.append("HA_TOKEN")     # masked below, but it is a change
+        applied["HA_TOKEN"] = HA_TOKEN
     applied = {name: applied[name] for name in changed_names}
-    changed = {name for name in applied if str(before.get(name)) != str(after.get(name))}
+    # `applied` is already reduced to real changes (a rotated token included,
+    # which the masked snapshot cannot show), so the probe keys off it directly
+    changed = set(applied)
     probe = {"ok": True, "detail": "unchanged"}
     if {"HA_URL", "HA_TOKEN"} & changed:
         probe = post_test_connection({})

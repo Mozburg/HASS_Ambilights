@@ -174,6 +174,13 @@ from PIL import Image
 
 import screen_to_lights as m
 
+# the module must use mss.MSS where available: mss.mss warns on every call
+import mss as _mss_module
+if hasattr(_mss_module, "MSS"):
+    assert m.mss is not getattr(_mss_module, "mss", None), \
+        "screen_to_lights still imports the deprecated mss.mss"
+    assert m.mss.__name__ == "MSS", m.mss.__name__
+
 m.mss = lambda: FakeMSS()
 m.HA_URL = f"http://127.0.0.1:{port}"
 m.session.headers.update({"Authorization": "Bearer test-token"})
@@ -633,6 +640,12 @@ _col = m.Target("light.col", frozenset({1, 4, 7}))         # one column, the old
 assert m.cells_for(_col, _grid, _cells).shape[0] == 22 * 36
 m.aggregate(_stitched)                                     # must not raise
 print("ragged zones ok: 22/21 column blocks stitch into one cell list")
+
+# --- browser furniture: favicon + the non-deprecated mss factory -----------
+_fav = m.favicon()
+assert getattr(_fav, "status_code", 200) == 204, "favicon should be a quiet 204"
+assert 'rel="icon"' in m.UI_HTML, "the page must carry its own icon"
+print("favicon ok: 204 route, inline icon, MSS factory")
 
 # --- light picker: entities come from Home Assistant ----------------------
 _orig_token = m.HA_TOKEN

@@ -402,6 +402,23 @@ m.BRIGHTNESS_BLEND = 1.0
 print("dominant ok: brightness region %d -> cluster %d (Y %.3f -> %.3f)"
       % (b_region, b_cluster, d_cluster["luminance"], d_cluster["dominant_luminance"]))
 
+# --- mean colour with dominant brightness must actually be configurable ------
+m.COLOUR_BLEND = 0.0
+m.BRIGHTNESS_FOLLOW_COLOUR = False
+m.BRIGHTNESS_BLEND = 1.0
+_split = m.aggregate(m._srgb_to_linear(
+    (lambda g: g)(np.where(np.arange(36 * 64).reshape(36, 64, 1) < 18 * 64, 30, np.array([255, 140, 40])))
+).astype(np.float32) / 255.0)
+assert "dominant" not in _split, "the colour must stay mean"
+assert "dominant_luminance" in _split, "brightness must be allowed to follow the cluster"
+assert _split["dominant_luminance"] > _split["luminance"], "a vivid half must lift the level"
+m.BRIGHTNESS_FOLLOW_COLOUR = True
+_plain = m.aggregate(m._srgb_to_linear(
+    (lambda g: g)(np.where(np.arange(36 * 64).reshape(36, 64, 1) < 18 * 64, 30, np.array([255, 140, 40])))
+).astype(np.float32) / 255.0)
+assert "dominant_luminance" not in _plain, "follow-on at blend 0 is plain mean brightness"
+print("blend ok: mean colour + dominant brightness works, and only when asked")
+
 # --- black cells (letterbox bars, black windows) must not break dominant --
 bars = np.zeros((12, 22, 3), dtype=np.uint8)          # 264 cells, 132 black
 bars[3:9, :] = (255, 120, 30)

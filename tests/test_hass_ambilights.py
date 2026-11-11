@@ -1332,6 +1332,38 @@ assert "capture_beat" in m.stats, "capture must stamp a heartbeat"
 assert "sender_beat" in m.stats or True, "sender stamps once it has run"
 print("liveness ok: capture_beat is stamped")
 
+# --- wave three: breaker, loops, bind address, UI payload -------------------
+# a 4xx is one misconfigured entity, not a dead host
+assert m.apply_settings({"BIND_HOST": "203.0.113.9"}, persist=False)[1], \
+    "an address this machine cannot bind must be refused"
+assert m.BIND_HOST != "203.0.113.9", m.BIND_HOST
+assert m.host_for_url("::1") == "[::1]", m.host_for_url("::1")
+assert m.host_for_url("127.0.0.1") == "127.0.0.1"
+print("bind ok: unbindable address refused, IPv6 literals bracketed")
+
+# the sender survives an exception instead of dying for good
+_keep_sender = m._sender_loop
+_restarts_before = m.stats.get("sender_restarts", 0)
+m._sender_loop = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+m.stop_event.clear()
+_thread = threading.Thread(target=m.sender_loop, daemon=True)
+_thread.start()
+time.sleep(0.4)
+m.stop_event.set()
+_thread.join(timeout=3)
+m._sender_loop = _keep_sender
+assert not _thread.is_alive(), "the sender loop must exit when asked"
+assert m.stats.get("sender_restarts", 0) > _restarts_before, m.stats.get("sender_restarts")
+print("sender ok: an exception restarts the loop instead of ending it")
+
+# the UI must not save an empty zone set as "all", nor post hidden aliases
+_ui_src = m.UI_HTML
+assert "if (!z.length) return" in _ui_src, "empty zones must not serialise as all"
+assert "visible.has(k)" in _ui_src, "hidden legacy keys must not be saved back"
+assert "setDirty(!!data.unsaved, false)" in _ui_src, "hydrating must not fire a live POST"
+assert "if (++misses > 5)" in _ui_src, "the calibrate poll must give up"
+print("ui ok: no empty-zone inflation, no hidden-key saves, no POST on load")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False

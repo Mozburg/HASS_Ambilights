@@ -1,12 +1,29 @@
 # Changelog
 
-All notable changes to Hass Ambilights. Format follows
+All notable changes to HASS Ambilights. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — the version lives in
 `hass_ambilights.py` as `__version__` and is reported by `GET /health`, `GET /api/config`
 and `hass_ambilights.py --version`.
 
 ## [Unreleased]
+
+## [2.3.0] — 2026-11-11
+
+### Added
+- **A splash screen while the exe boots.** PyInstaller's splash window shows the name,
+  the four-dot mark and the version while the archive unpacks and the settings server
+  comes up, then disappears the moment there is a window to look at — and it is closed on
+  a failed start too, so it can never be left behind. The image is generated from
+  `__version__` at build time (`packaging/make_splash.py`), not committed.
+
+### Changed
+- **The project is called HASS Ambilights everywhere it is read by a person**: window
+  title, tray tooltip, settings page, log lines, splash, and the Windows version
+  resource. `FileDescription` is now `HASS Ambilights`, which is what Task Manager shows
+  in its Name column — previously it read "Mirror the screen onto Home Assistant lights".
+  The executable is still `HassAmbilights.exe` and settings still live in
+  `%APPDATA%\HassAmbilights`, so nothing moves for existing installs.
 
 ## [2.2.2] — 2026-11-11
 

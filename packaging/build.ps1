@@ -6,18 +6,19 @@ Set-Location (Join-Path $PSScriptRoot "..")
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt -r requirements-gui.txt pyinstaller
 
-# icon + Windows version resource are generated from __version__, not committed
+# icon, splash and Windows version resource are generated from __version__
 python packaging/make_assets.py
+python packaging/make_splash.py
 
 python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --name HassAmbilights `
   --icon packaging/icon.ico `
+  --splash packaging/splash.png `
   --version-file packaging/version_info.txt `
   --collect-submodules uvicorn `
   --collect-submodules pystray `
   --collect-submodules webview `
   --hidden-import pystray._win32 `
-  --exclude-module tkinter `
   --exclude-module matplotlib `
   hass_ambilights.py
 

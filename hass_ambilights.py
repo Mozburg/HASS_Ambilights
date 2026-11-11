@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hass Ambilights - mirror chosen parts of the screen onto Home Assistant lights.
+"""HASS Ambilights - mirror chosen parts of the screen onto Home Assistant lights.
 
 Zones: the screen is split into a 3x3 grid, numbered in reading order
 
@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.2.2"
+__version__ = "2.3.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -515,7 +515,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Ccircle cx='11' cy='11' r='6' fill='%23ff5c5c'/%3E%3Ccircle cx='21' cy='11' r='6' fill='%2344d17a'/%3E%3Ccircle cx='11' cy='21' r='6' fill='%234493f8'/%3E%3Ccircle cx='21' cy='21' r='6' fill='%23ffd226'/%3E%3C/svg%3E">
-<title>Hass Ambilights</title>
+<title>HASS Ambilights</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161b22; --panel2:#1c2129; --line:#2b333d;
@@ -624,7 +624,7 @@ UI_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <h1>Hass Ambilights</h1>
+  <h1>HASS Ambilights</h1>
   <span class="badge" id="dirtybadge" hidden>unsaved changes</span>
   <span class="live">
     <span id="dot" class="dot"></span><span id="conn">connecting…</span>
@@ -1110,7 +1110,7 @@ async function reload() {
   if (ENTITIES === null) await loadEntities(false);   // first paint only
   if (MONITORS === null) await loadMonitors();
   $("version").textContent = data.version ? "v" + data.version : "";
-  $("version").title = "Hass Ambilights " + (data.version || "");
+  $("version").title = "HASS Ambilights " + (data.version || "");
   $("cfgpath").textContent = data.config_path;
   $("hapill").textContent = data.ha_url;
   renderSettings();
@@ -3253,7 +3253,7 @@ async def lifespan(_app: FastAPI):
         poster.join(timeout=3)
 
 
-app = FastAPI(title="Hass Ambilights", lifespan=lifespan)
+app = FastAPI(title="HASS Ambilights", lifespan=lifespan)
 
 
 @app.get("/raw_grid")
@@ -3649,7 +3649,7 @@ def _hide_instead_of_close(window) -> bool:
     return False
 
 
-def build_tray(on_show, on_quit, label: str = "Hass Ambilights"):
+def build_tray(on_show, on_quit, label: str = "HASS Ambilights"):
     """Create the tray icon without starting it, or None if pystray is missing."""
     try:
         import pystray
@@ -3720,7 +3720,7 @@ def run_window(url: str, close_to_tray: bool | None = None) -> int:
                 time.sleep(1)
         except KeyboardInterrupt:
             return 0
-    window = webview.create_window("Hass Ambilights", url, width=1180, height=840,
+    window = webview.create_window("HASS Ambilights", url, width=1180, height=840,
                                    min_size=(900, 600))
     if close_to_tray:
         start_tray_for_window(window, url)
@@ -3767,8 +3767,39 @@ def run_tray(url: str) -> int:
     return 0
 
 
+def splash_text(message: str) -> None:
+    """Update the boot splash. Silent when this build has no splash."""
+    try:
+        import pyi_splash
+    except ImportError:
+        return
+    try:
+        pyi_splash.update_text(message)
+    except Exception:                        # a splash without a text area
+        pass
+
+
+def close_splash() -> None:
+    """Dismiss the boot splash. Safe to call anywhere, any number of times."""
+    try:
+        import pyi_splash
+    except ImportError:                      # not a frozen --splash build
+        return
+    try:
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Screen colour -> Home Assistant lights")
+    try:
+        _run()
+    finally:
+        close_splash()               # never outlive a failed start
+
+
+def _run() -> None:
+    parser = argparse.ArgumentParser(description="HASS Ambilights - screen colour -> Home Assistant lights")
     parser.add_argument("--version", action="version",
                         version=f"hass_ambilights {__version__}")
     parser.add_argument("--autotune", action="store_true",
@@ -3811,17 +3842,20 @@ def main() -> None:
     redirect_std_streams()
     setup_file_logging()
     make_dpi_aware()                     # before any window or capture exists
-    log.info("Hass Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
+    log.info("HASS Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
+    splash_text("loading settings")
 
     load_secrets()
     load_config_file()                   # BIND_* may come from config.json
+    splash_text("starting the settings server")
 
     host = "127.0.0.1" if BIND_HOST in ("0.0.0.0", "::") else BIND_HOST
 
     existing = find_instance(host, BIND_PORT)
     if existing is not None:
         url = f"http://{host}:{existing}/"
-        log.info("Hass Ambilights is already running at %s", url)
+        log.info("HASS Ambilights is already running at %s", url)
+        close_splash()
         if mode == "window" and gui_available():
             run_window(url)
         else:
@@ -3859,6 +3893,7 @@ def main() -> None:
 
             threading.Timer(1.0, webbrowser.open, (url,)).start()
         log.info("serving on http://%s:%s", BIND_HOST, port)
+        close_splash()
         uvicorn.run(app, host=BIND_HOST, port=port, log_config=None)
         return
 
@@ -3869,6 +3904,7 @@ def main() -> None:
         thread.join(timeout=5)
         raise SystemExit(f"the settings server did not start on {url} - check the log")
     log.info("serving %s in %s mode", url, mode)
+    close_splash()                       # the window is about to appear
     try:
         code = run_window(url) if mode == "window" else run_tray(url)
     finally:

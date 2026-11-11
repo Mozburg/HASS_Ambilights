@@ -997,6 +997,84 @@ for mode, payload, want in (("rgb", {"rgb_color": [1, 2, 3]}, True),
 m.session, m._post = _keep_session, _keep_post
 print("restore ok: rgb/xy/colour-temp read-backs all match")
 
+# --- name, and the splash ---------------------------------------------------
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+_ROOT = _Path(__file__).resolve().parent.parent
+
+
+def _load(name, rel):
+    spec = _ilu.spec_from_file_location(name, _ROOT / rel)
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# the splash is optional and must never be a reason to fail a start
+assert m.close_splash() is None, "close_splash must be harmless without pyi_splash"
+assert m.splash_text("anything") is None
+
+import sys as _sys2
+import types as _types2
+
+_seen = {"text": None, "closed": 0}
+_fake_splash = _types2.ModuleType("pyi_splash")
+_fake_splash.update_text = lambda text: _seen.__setitem__("text", text)
+_fake_splash.close = lambda: _seen.__setitem__("closed", _seen["closed"] + 1)
+_sys2.modules["pyi_splash"] = _fake_splash
+try:
+    m.splash_text("starting the settings server")
+    assert _seen["text"] == "starting the settings server", _seen
+    m.close_splash()
+    assert _seen["closed"] == 1, _seen
+    m.close_splash()                        # idempotent
+    assert _seen["closed"] == 2, _seen
+
+    # a splash that cannot close must not take the app down with it
+    _fake_splash.close = lambda: (_ for _ in ()).throw(RuntimeError("no window"))
+    assert m.close_splash() is None
+finally:
+    _sys2.modules.pop("pyi_splash", None)
+print("splash: updates its text, closes, and never raises")
+
+_assets = _load("make_assets", "packaging/make_assets.py")
+_info = _Path(tempfile.mkdtemp()) / "version_info.txt"
+_assets.make_version_info(_info, "9.9.9")
+_text = _info.read_text()
+assert "StringStruct('FileDescription', 'HASS Ambilights')" in _text, "Task Manager name"
+assert "StringStruct('ProductName', 'HASS Ambilights')" in _text
+assert "'Hass Ambilights'" not in _text, "old brand left in the version resource"
+print("windows resource: FileDescription is 'HASS Ambilights' (Task Manager name)")
+
+_splash_mod = _load("make_splash", "packaging/make_splash.py")
+_png = _Path(tempfile.mkdtemp()) / "splash.png"
+_splash_mod.make_splash(_png, "9.9.9")
+assert _png.exists() and _png.stat().st_size > 2000, _png.stat().st_size
+from PIL import Image as _Image
+
+with _Image.open(_png) as _im:
+    assert _im.size == (620, 360), _im.size
+    assert _im.format == "PNG"
+print(f"splash image: {_png.stat().st_size} bytes, 620x360 PNG")
+
+_ps1 = (_ROOT / "packaging" / "build.ps1").read_text()
+_yml = (_ROOT / ".github" / "workflows" / "windows.yml").read_text()
+for _name, _script in (("build.ps1", _ps1), ("windows.yml", _yml)):
+    assert "--splash packaging/splash.png" in _script, _name
+    assert "make_splash.py" in _script, f"{_name} must generate the splash"
+    # PyInstaller's splash is a Tk window, so Tk may not be excluded any more
+    assert "--exclude-module tkinter" not in _script, f"{_name} would break the splash"
+print("build: splash passed through, Tk no longer excluded")
+
+# the brand a person sees, in one place
+_ui = m.UI_HTML
+assert "<h1>HASS Ambilights</h1>" in _ui, "page heading"
+assert "<title>HASS Ambilights</title>" in _ui, "tab title"
+assert '"Hass Ambilights "' not in _ui, "old brand left in the page"
+assert m.app.title == "HASS Ambilights", m.app.title
+print("brand: heading, tab title and API name all read HASS Ambilights")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False
@@ -1236,7 +1314,7 @@ _ui = m.index_page()
 assert getattr(_ui, "status_code", 200) == 200, "GET / must serve the embedded page"
 _page = _ui.body.decode()
 for needle in ('id="settings"', 'id="zonebits"', 'id="lightlive"', 'id="refreshlights"',
-               'id="lights"', "Hass Ambilights", "Test connection",
+               'id="lights"', "HASS Ambilights", "Test connection",
                'className = "adv"', "function refreshVisibility", "row.hidden = !visible"):
     assert needle in _page, needle
 assert "/static/" not in _page, "page must not depend on external assets"

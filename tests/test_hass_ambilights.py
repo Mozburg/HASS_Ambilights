@@ -169,6 +169,8 @@ os.environ["HA_URL"] = f"http://127.0.0.1:{port}"
 os.environ.setdefault("HA_TOKEN", "test-token")
 os.environ["CAPTURE_FPS"] = "30"
 os.environ["MONITOR_INDEX"] = "1"
+# never let a test re-exec the test runner as if it were the app
+os.environ["HASS_AMBILIGHTS_NO_RESTART"] = "1"
 
 from PIL import Image
 
@@ -1129,6 +1131,66 @@ assert "<title>HASS Ambilights</title>" in _ui, "tab title"
 assert '"Hass Ambilights "' not in _ui, "old brand left in the page"
 assert m.app.title == "HASS Ambilights", m.app.title
 print("brand: heading, tab title and API name all read HASS Ambilights")
+
+# --- a setting that needs a restart gets one --------------------------------
+_keep = (m.CONFIG_PATH, os.execv, m.AUTO_RESTART, m.stats.get("restarting"),
+         m.MONITOR_INDEX, m.CAPTURE_FPS)
+_guard_dir = Path(tempfile.mkdtemp())
+m.CONFIG_PATH = _guard_dir / "config.json"
+m.AUTO_RESTART = True
+_fired = []
+os.execv = lambda path, argv: _fired.append((path, list(argv)))
+
+# the command that starts the program again
+_nonfrozen = m.restart_argv()
+assert _nonfrozen[0] == sys.executable, _nonfrozen
+assert _nonfrozen[1].endswith("hass_ambilights.py"), _nonfrozen
+sys.frozen = True
+try:
+    _frozen = m.restart_argv()
+    assert _frozen[0] == sys.executable and _frozen[1:] == sys.argv[1:], _frozen
+finally:
+    del sys.frozen
+print("restart: re-execs the exe when frozen, the script when not")
+
+# saving a restart-only setting restarts, and says so before it goes
+m.stats["restarting"] = False
+_saved = m.post_config({"MONITOR_INDEX": 2})
+assert _saved["restart_required"] == ["MONITOR_INDEX"], _saved
+assert _saved["restarting"] is True, _saved
+time.sleep(1.2)                                   # the timer fires
+assert _fired, "os.execv was never called"
+assert _fired[0][0] == _fired[0][1][0]
+assert m.health()["restarting"] is True
+print("restart: a saved restart-only setting re-execs the process")
+
+# ...but not twice inside the guard window: that would be a crash loop
+m.stats["restarting"] = False
+_again = m.post_config({"MONITOR_INDEX": 1})
+assert _again["restart_required"] == ["MONITOR_INDEX"], _again
+assert _again["restarting"] is False, "a second restart inside 30 s must be refused"
+print("restart: a second restart within 30 s is refused (no crash loop)")
+
+# live application is not a save, so it must not restart anything
+_fired.clear()
+m.stats["restarting"] = False
+_live = m.post_config({"MONITOR_INDEX": 0, "persist": False})
+assert _live["restart_required"] == ["MONITOR_INDEX"], _live
+assert _live["restarting"] is False, "a live apply must not restart the app"
+time.sleep(1.0)
+assert not _fired, _fired
+print("restart: live apply of the same setting stays put")
+
+# a setting that does not need a restart must not cause one
+m.stats["restarting"] = False
+_plain = m.post_config({"CAPTURE_FPS": 9.0})
+assert _plain["restart_required"] == [], _plain
+assert _plain["restarting"] is False, _plain
+print("restart: ordinary settings still apply without one")
+
+m.CONFIG_PATH, os.execv, m.AUTO_RESTART = _keep[0], _keep[1], _keep[2]
+m.MONITOR_INDEX, m.CAPTURE_FPS = _keep[4], _keep[5]
+m.stats["restarting"] = False
 
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN

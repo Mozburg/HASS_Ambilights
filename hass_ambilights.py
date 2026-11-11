@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -293,13 +293,17 @@ BRIGHTNESS_GAMMA = float(_env("BRIGHTNESS_GAMMA", "0.8"))
 # What "the colour of the screen" means.
 #   mean     = linear average of the whole region (faithful to radiance)
 #   dominant = the most prominent COLOURED cluster, white/neutral cells ignored
-COLOR_ALGO = _env("COLOR_ALGO", "dominant")        # mean | dominant
-DOMINANT_MIX = float(_env("DOMINANT_MIX", "0.5"))   # 0 = mean, 1 = pure dominant
+COLOUR_BLEND = float(_env("COLOUR_BLEND", _env("DOMINANT_MIX", "0.5")))  # 0 = mean, 1 = dominant
+BRIGHTNESS_FOLLOW_COLOUR = _env("BRIGHTNESS_FOLLOW_COLOUR", "1") == "1"
 # Which brightness the light gets in dominant mode:
 #   cluster = the dominant object's own luminance (a bright photo on a dark page
 #             lights the room properly: measured 114 -> 191 on the same frame)
 #   region  = the whole region's mean luminance (the old behaviour)
-DOMINANT_LUMINANCE = _env("DOMINANT_LUMINANCE", "cluster")   # cluster | region
+BRIGHTNESS_BLEND = float(_env("BRIGHTNESS_BLEND", "1" if _env("DOMINANT_LUMINANCE", "cluster") == "cluster" else "0"))
+# legacy spellings, still accepted so old config files and scripts keep working
+COLOR_ALGO = _env("COLOR_ALGO", "dominant")
+DOMINANT_MIX = float(_env("DOMINANT_MIX", str(COLOUR_BLEND)))
+DOMINANT_LUMINANCE = _env("DOMINANT_LUMINANCE", "cluster")
 CHROMA_FLOOR = float(_env("CHROMA_FLOOR", "0.010"))  # du'v' below this = neutral
 HUE_BINS = int(_env("HUE_BINS", "24"))
 
@@ -618,6 +622,9 @@ UI_HTML = r"""<!DOCTYPE html>
   #toast.show{transform:translateX(-50%) translateY(0)}
   #toast.err{border-color:var(--bad);color:#ffb4ae}
   small.mono{font-family:ui-monospace,monospace;color:var(--muted)}
+  .ends{display:flex;justify-content:space-between;gap:8px;font-size:11px;
+    color:var(--muted-foreground);margin-top:2px}
+  .ends .here{color:var(--foreground);font-variant-numeric:tabular-nums}
   .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
     clip:rect(0 0 0 0);white-space:nowrap;border:0}
 </style>
@@ -938,9 +945,30 @@ function control(meta, value) {
       v = Math.min(+range.max, Math.max(+range.min, +v));
       CFG[meta.name] = v; range.value = v; num.value = v; setDirty(true, true);
     };
-    range.oninput = () => sync(range.value);
-    num.onchange = () => sync(num.value);
+    let paintEnds = () => {};        // assigned below when the slider names its ends;
+    range.oninput = () => { sync(range.value); paintEnds(); };   // a const declared inside
+    num.onchange = () => { sync(num.value); paintEnds(); };      // that block would not be
+                                                                 // in scope here
     wrap.append(range, num);
+    if (meta.ends) {
+      // 0 and 1 mean nothing on their own: label both ends and the current value
+      const legend = document.createElement("div");
+      legend.className = "ends";
+      const left = document.createElement("span");
+      left.textContent = `${meta.ends[0]} · ${range.min}`;
+      const here = document.createElement("span");
+      here.className = "here";
+      const right = document.createElement("span");
+      right.textContent = `${range.max} · ${meta.ends[1]}`;
+      legend.append(left, here, right);
+      paintEnds = () => {
+        const v = Number(range.value);
+        here.textContent = `${v.toFixed(2)} = ${(1 - v).toFixed(2)} ${meta.ends[0]}`
+          + ` + ${v.toFixed(2)} ${meta.ends[1]}`;
+      };
+      paintEnds();
+      wrap.appendChild(legend);
+    }
     return wrap;
   }
   if (meta.type === "secret") {
@@ -999,6 +1027,12 @@ function refreshVisibility() {
     try { rule = JSON.parse(row.dataset.showIf); } catch (e) { return; }
     const visible = Object.entries(rule).every(([name, want]) => {
       const got = CFG[name];
+      if (want && typeof want === "object") {          // {"$gt": 0}, {"$lt": 1}
+        if ("$gt" in want) return Number(got) > want.$gt;
+        if ("$lt" in want) return Number(got) < want.$lt;
+        if ("$ne" in want) return String(got) !== String(want.$ne);
+        return true;
+      }
       return String(got) === String(want) || (typeof want === "boolean" && !!got === want);
     });
     row.hidden = !visible;
@@ -1013,7 +1047,8 @@ function refreshVisibility() {
 
 function renderSettings() {
   const groups = {};
-  META.filter((m) => m.name !== "LIGHT_MAP").forEach((m) => (groups[m.group] ||= []).push(m));
+  META.filter((m) => m.name !== "LIGHT_MAP" && !m.hidden)
+    .forEach((m) => (groups[m.group] ||= []).push(m));
   const host = $("settings");
   host.innerHTML = "";
   Object.entries(groups).forEach(([group, items]) => {
@@ -1567,23 +1602,34 @@ SETTINGS = [
     _spec("HA_TOKEN", "secret", "", "Home Assistant", "Long-lived token",
           "Create one in Home Assistant: profile -> Security -> Long-lived access tokens. "
           "Stored in secrets.json (chmod 600), never sent back to the browser."),
-    _spec("COLOR_ALGO", "enum", "dominant", "Colour", "Colour model",
-          "mean = linear average of the zones. dominant = the most prominent coloured "
-          "cluster, neutral/white cells ignored.", values=["mean", "dominant"]),
-    _spec("DOMINANT_MIX", "float", 0.5, "Colour", "Dominant mix",
-          "0 = pure average, 1 = pure dominant colour. Blended in u'v' (perceptually uniform).",
-          min=0.0, max=1.0, step=0.05, show_if={"COLOR_ALGO": "dominant"}),
-    _spec("DOMINANT_LUMINANCE", "enum", "cluster", "Colour", "Dominant brightness",
-          "cluster = the dominant object's own luminance; region = the zone's mean. "
-          "Only matters when dominant mix > 0.", values=["cluster", "region"], advanced=True, show_if={"COLOR_ALGO": "dominant"}),
+    _spec("COLOUR_BLEND", "float", 0.5, "Colour", "Colour model",
+          "0 = the region's average colour, 1 = its most prominent coloured cluster, "
+          "and anything between is a blend. 0.5 is the default.",
+          min=0.0, max=1.0, step=0.05, scale=1.0, ends=("mean", "dominant")),
+    _spec("BRIGHTNESS_FOLLOW_COLOUR", "bool", True, "Colour", "Brightness follows colour",
+          "On: brightness blends the same way the colour does. Off: set it separately."),
+    _spec("BRIGHTNESS_BLEND", "float", 0.5, "Colour", "Brightness blend",
+          "0 = the zone's average luminance, 1 = the dominant cluster's own luminance.",
+          min=0.0, max=1.0, step=0.05, ends=("zone mean", "dominant"),
+          show_if={"BRIGHTNESS_FOLLOW_COLOUR": False}),
+    # accepted from old config files and scripts; folded into the two sliders above
+    _spec("COLOR_ALGO", "enum", "dominant", "Colour", "Colour model (legacy)",
+          "Deprecated: set Colour model instead.", values=["mean", "dominant"],
+          hidden=True, advanced=True),
+    _spec("DOMINANT_MIX", "float", 0.5, "Colour", "Dominant mix (legacy)",
+          "Deprecated: set Colour model instead.", min=0.0, max=1.0, step=0.05, hidden=True,
+          advanced=True),
+    _spec("DOMINANT_LUMINANCE", "enum", "cluster", "Colour", "Dominant brightness (legacy)",
+          "Deprecated: set Brightness blend instead.", values=["cluster", "region"],
+          hidden=True, advanced=True),
     _spec("CHROMA_FLOOR", "float", 0.010, "Colour", "Neutral threshold",
           "du'v' below this counts as neutral when picking the dominant colour.",
-          min=0.001, max=0.05, step=0.001, advanced=True, show_if={"COLOR_ALGO": "dominant"}),
+          min=0.001, max=0.05, step=0.001, advanced=True, show_if={"COLOUR_BLEND": {"$gt": 0.001}}),
     _spec("HUE_BINS", "int", 24, "Colour", "Hue bins",
           "Dominant mode's hue resolution (24 = 15° buckets, averaged with their "
           "neighbours). Lower merges similar hues; higher separates them but can "
           "flicker.",
-          min=6, max=72, advanced=True, show_if={"COLOR_ALGO": "dominant"}),
+          min=6, max=72, advanced=True, show_if={"COLOUR_BLEND": {"$gt": 0.001}}),
     _spec("SATURATION_BOOST", "bool", False, "Colour", "Saturation boost",
           "Push chroma away from white as the frame gets brighter. Off sends the "
           "measured colour untouched."),
@@ -1616,7 +1662,7 @@ SETTINGS = [
     _spec("CAPTURE_FPS", "float", 12.0, "Capture", "Capture rate",
           "Screen samples per second. Sends are paced separately. Auto tune sets this "
           "from the pacing it measured.",
-          min=1.0, max=60.0, step=0.1),
+          min=1.0, max=60.0, step=0.1, advanced=True),
     _spec("CAPTURE_STRIDE", "int", 4, "Capture", "Pixel stride",
           "Use every Nth pixel: 1 = lossless and expensive, 4 = 1/16 of the pixels.",
           min=1, max=16, restart=False, advanced=True),
@@ -1828,6 +1874,28 @@ def persist_config(path: Path | None = None) -> bool:
     except OSError as exc:
         log.warning("could not write %s: %s", path, exc)
         return False
+
+
+def _translate_legacy_colour(settings: dict) -> dict:
+    """Fold the old COLOR_ALGO / DOMINANT_MIX / DOMINANT_LUMINANCE into the sliders.
+
+    Old config files and scripts keep working; the new keys win when both appear.
+    """
+    if not isinstance(settings, dict):
+        return settings
+    out = dict(settings)
+    if "COLOUR_BLEND" not in out:
+        if "DOMINANT_MIX" in out:
+            out["COLOUR_BLEND"] = out["DOMINANT_MIX"]
+        elif "COLOR_ALGO" in out:
+            algo = str(out["COLOR_ALGO"]).strip().lower()
+            out["COLOUR_BLEND"] = 0.0 if algo == "mean" else 1.0
+    if "DOMINANT_LUMINANCE" in out and "BRIGHTNESS_BLEND" not in out:
+        mode = str(out["DOMINANT_LUMINANCE"]).strip().lower()
+        out["BRIGHTNESS_BLEND"] = 0.0 if mode == "region" else 1.0
+    for legacy in ("COLOR_ALGO", "DOMINANT_MIX", "DOMINANT_LUMINANCE"):
+        out.pop(legacy, None)
+    return out
 
 
 def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]]:
@@ -2196,23 +2264,24 @@ def aggregate(cells_lin: np.ndarray) -> dict:
         "xy": [round(x, 4), round(y, 4)],
         "luminance": round(float(_linear_to_xyz(mean_lin)[1]), 4),
     }
-    if COLOR_ALGO == "dominant":
+    colour_blend = min(1.0, max(0.0, COLOUR_BLEND))
+    if colour_blend > 0:
         (dx, dy), cluster_lin = dominant_colour(cells_lin.reshape(-1, 3), (x, y))
-        if DOMINANT_MIX < 1.0:
+        if colour_blend < 1.0:
             mu, mv = _xy_to_uv((x, y))
             du, dv = _xy_to_uv((dx, dy))
-            blend = min(1.0, max(0.0, DOMINANT_MIX))
-            dx, dy = _uv_to_xy((mu + blend * (du - mu), mv + blend * (dv - mv)))
+            dx, dy = _uv_to_xy((mu + colour_blend * (du - mu), mv + colour_blend * (dv - mv)))
         out["dominant"] = [round(dx, 4), round(dy, 4)]
         # The brightness/dedupe decision has to look at the colour we actually
         # send, not the region mean, or the two disagree (a vivid block on a dark
         # page kept the lamp dim, and hue changes could pass the dE test).
         level = out["luminance"]
-        if DOMINANT_LUMINANCE == "cluster" and cluster_lin is not None:
+        if cluster_lin is not None:
+            luma_blend = (colour_blend if BRIGHTNESS_FOLLOW_COLOUR
+                          else min(1.0, max(0.0, BRIGHTNESS_BLEND)))
             cluster_y = float(_linear_to_xyz(cluster_lin)[1])
-            if DOMINANT_MIX < 1.0:          # blend the brightness with the mix too
-                blend = min(1.0, max(0.0, DOMINANT_MIX))
-                cluster_y = level + blend * (cluster_y - level)
+            if luma_blend < 1.0:
+                cluster_y = level + luma_blend * (cluster_y - level)
             out["dominant_luminance"] = round(cluster_y, 4)
             level = cluster_y
         out["rgb_dominant"] = srgb_from_xy((dx, dy), max(level, 1e-4))
@@ -3162,7 +3231,7 @@ def capture_loop() -> None:
             light_report: dict[str, dict] = {}
             for target in TARGETS:
                 colour = aggregate(cells_for(target, lin, zone_cells))
-                if COLOR_ALGO == "dominant" and "dominant" in colour:
+                if "dominant" in colour:
                     colour["xy"] = colour["dominant"]
                     colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
                     colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
@@ -3358,11 +3427,11 @@ def health():
         "capture_stride": CAPTURE_STRIDE,
         "capture_rect": stats["crop"],
         "send_concurrency": SEND_CONCURRENCY,
-        "dominant_luminance": DOMINANT_LUMINANCE,
+        "brightness_blend": (COLOUR_BLEND if BRIGHTNESS_FOLLOW_COLOUR else BRIGHTNESS_BLEND),
+        "brightness_follows_colour": BRIGHTNESS_FOLLOW_COLOUR,
         "idle_fps": IDLE_FPS,
-        "color_algo": COLOR_ALGO,
+        "colour_blend": COLOUR_BLEND,
         "brightness_from": BRIGHTNESS_FROM,
-        "dominant_mix": DOMINANT_MIX,
         "saturation_boost": SATURATION_BOOST,
         "send_mode": SEND_MODE,
         "dry_run": DRY_RUN,

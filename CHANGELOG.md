@@ -8,6 +8,28 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-11-11
+
+### Changed
+- **The colour model is one slider.** `COLOR_ALGO` (an enum) plus `DOMINANT_MIX` (a
+  second slider that only did anything in one of its two states) were two controls for one
+  decision. They are now `COLOUR_BLEND`: **0 = mean, 1 = dominant**, 0.5 by default, with
+  both ends labelled under the slider and a live readout of the mix. Old keys are still
+  accepted — a config with `COLOR_ALGO=mean` loads as 0, `dominant` as 1 — and are hidden
+  from the page rather than deleted.
+- **Brightness blend with a follow flag.** `DOMINANT_LUMINANCE` (cluster/region) became
+  `BRIGHTNESS_BLEND` (0–1) plus `BRIGHTNESS_FOLLOW_COLOUR`, on by default so brightness
+  tracks the colour slider; turn it off to pick a brightness mix independently.
+- **Capture rate moved into Advanced** in the Capture card. Auto tune sets it, so it is a
+  read-it-when-curious knob, not an everyday one.
+- The dominant-only knobs (`HUE_BINS`, `CHROMA_FLOOR`) now appear whenever
+  `COLOUR_BLEND` is above 0, instead of keying off the old enum.
+
+### Fixed
+- A `ReferenceError: paintEnds is not defined` in the new slider legend: the painter was
+  declared inside the `if` block that built the legend, so the input handlers (outside that
+  block) could not see it. The legend now tracks the slider, verified in a browser.
+
 ## [2.6.0] — 2026-11-11
 
 ### Added

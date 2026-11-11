@@ -207,11 +207,11 @@ def brightness_of(rgb, *extra):
 
 
 # --- shipped defaults -----------------------------------------------------
-assert m.COLOR_ALGO == "dominant", m.COLOR_ALGO
-assert m.DOMINANT_MIX == 0.5, m.DOMINANT_MIX
+assert m.COLOUR_BLEND == 0.5, m.COLOUR_BLEND
+assert m.BRIGHTNESS_FOLLOW_COLOUR is True, "brightness follows the colour slider by default"
 assert m.SATURATION_BOOST is False, m.SATURATION_BOOST
-assert m.DOMINANT_LUMINANCE == "cluster"
-print("defaults ok: %s / mix %.1f / boost %s" % (m.COLOR_ALGO, m.DOMINANT_MIX, m.SATURATION_BOOST))
+print("defaults ok: blend %.2f / follows colour %s / boost %s"
+      % (m.COLOUR_BLEND, m.BRIGHTNESS_FOLLOW_COLOUR, m.SATURATION_BOOST))
 
 # --- LIGHT_MAP parsing ----------------------------------------------------
 t = m.parse_light_map("")
@@ -355,18 +355,21 @@ print("saturation ok: du_v %.4f -> %.4f" % (m._neo(pale_xy, m.D65_XY), m._neo(pa
 
 # --- mean vs dominant ----------------------------------------------------
 page = page_grid()
-m.COLOR_ALGO = "mean"
+m.COLOUR_BLEND = 0.0
 mean_r = m.aggregate(m._srgb_to_linear(page.astype(np.float32) / 255.0))
-m.COLOR_ALGO = "dominant"
+m.COLOUR_BLEND = 1.0
 dom_r = m.aggregate(m._srgb_to_linear(page.astype(np.float32) / 255.0))
 assert "dominant" not in mean_r and "dominant" in dom_r
 assert m._neo(dom_r["dominant"], m.D65_XY) > 3 * m._neo(mean_r["xy"], m.D65_XY)
 gray = np.full((9, 16, 3), 128, dtype=np.uint8)
 assert m.aggregate(m._srgb_to_linear(gray / 255.0))["dominant"] == m.aggregate(m._srgb_to_linear(gray / 255.0))["xy"]
-m.DOMINANT_MIX = 0.0
-assert m.aggregate(m._srgb_to_linear(page.astype(np.float32) / 255.0))["dominant"] == mean_r["xy"]
-m.DOMINANT_MIX = 1.0
-m.COLOR_ALGO = "mean"
+m.COLOUR_BLEND = 0.0
+assert "dominant" not in m.aggregate(m._srgb_to_linear(page.astype(np.float32) / 255.0))
+m.COLOUR_BLEND = 0.5                                  # halfway between the two
+_half = m.aggregate(m._srgb_to_linear(page.astype(np.float32) / 255.0))
+assert m._neo(_half["dominant"], m.D65_XY) < m._neo(dom_r["dominant"], m.D65_XY)
+assert m._neo(_half["dominant"], m.D65_XY) > m._neo(mean_r["xy"], m.D65_XY)
+m.COLOUR_BLEND = 0.0
 print("mean vs dominant ok: %.4f vs %.4f" % (m._neo(mean_r["xy"], m.D65_XY),
                                              m._neo(dom_r["dominant"], m.D65_XY)))
 
@@ -374,11 +377,11 @@ print("mean vs dominant ok: %.4f vs %.4f" % (m._neo(mean_r["xy"], m.D65_XY),
 dark = np.full((36, 64, 3), 30, dtype=np.uint8)
 dark[10:26, 18:48] = (255, 140, 40)             # vivid photo panel on a dark page
 dark_lin = m._srgb_to_linear(dark.astype(np.float32) / 255.0)
-m.COLOR_ALGO = "dominant"
-m.DOMINANT_MIX = 1.0
-m.DOMINANT_LUMINANCE = "region"
+m.COLOUR_BLEND = 1.0
+m.BRIGHTNESS_FOLLOW_COLOUR = False
+m.BRIGHTNESS_BLEND = 0.0
 d_region = m.aggregate(dark_lin)
-m.DOMINANT_LUMINANCE = "cluster"
+m.BRIGHTNESS_BLEND = 1.0
 d_cluster = m.aggregate(dark_lin)
 assert "rgb_dominant" in d_region and "dominant_luminance" in d_cluster
 assert tuple(d_region["rgb_dominant"]) != tuple(d_region["rgb"])
@@ -394,9 +397,8 @@ sent_colour = {**d_cluster, "xy": d_cluster["dominant"], "rgb": d_cluster["rgb_d
 m.BRIGHTNESS_FROM = "value"
 assert m.brightness_for_colour(sent_colour) > m.brightness_for_colour(d_cluster)
 m.BRIGHTNESS_FROM = "lstar"
-m.COLOR_ALGO = "mean"
-m.DOMINANT_LUMINANCE = "cluster"
-m.DOMINANT_MIX = 0.5
+m.COLOUR_BLEND = 0.0
+m.BRIGHTNESS_BLEND = 1.0
 print("dominant ok: brightness region %d -> cluster %d (Y %.3f -> %.3f)"
       % (b_region, b_cluster, d_cluster["luminance"], d_cluster["dominant_luminance"]))
 
@@ -404,9 +406,8 @@ print("dominant ok: brightness region %d -> cluster %d (Y %.3f -> %.3f)"
 bars = np.zeros((12, 22, 3), dtype=np.uint8)          # 264 cells, 132 black
 bars[3:9, :] = (255, 120, 30)
 bars_lin = m._srgb_to_linear(bars.astype(np.float32) / 255.0)
-m.COLOR_ALGO = "dominant"
-m.DOMINANT_LUMINANCE = "cluster"
-m.DOMINANT_MIX = 1.0
+m.COLOUR_BLEND = 1.0
+m.BRIGHTNESS_BLEND = 1.0
 out = m.aggregate(bars_lin)                            # used to raise IndexError
 assert out["dominant"], out
 assert m._neo(tuple(out["dominant"]), m.xy_from_rgb([255, 120, 30])) < 0.01, out["dominant"]
@@ -418,13 +419,13 @@ two[3:9, :14] = (255, 120, 30)
 two[3:9, 14:] = (0, 80, 255)
 o2 = m.aggregate(m._srgb_to_linear(two.astype(np.float32) / 255.0))
 assert m._neo(tuple(o2["dominant"]), m.xy_from_rgb([255, 120, 30])) < 0.01, o2["dominant"]
-m.COLOR_ALGO = "mean"
-m.DOMINANT_MIX = 0.5
+m.COLOUR_BLEND = 0.5
+m.BRIGHTNESS_FOLLOW_COLOUR = True
 print("black cells ok: dominant %s, cluster Y %.3f vs region %.3f"
       % (out["dominant"], out["dominant_luminance"], out["luminance"]))
 
 # --- saturation can be switched off entirely ----------------------------
-assert m.DOMINANT_MIX == 0.5, "default mix should be 0.5, got %s" % m.DOMINANT_MIX
+assert m.COLOUR_BLEND == 0.5, "default blend should be 0.5, got %s" % m.COLOUR_BLEND
 m.SATURATION_BOOST = False
 assert m.saturation_factor(1.0) == 1.0
 off_xy, off_k = m.boost_saturation(pale_xy, 0.9)
@@ -537,7 +538,7 @@ for t in same:
     t.last_success_mono = 0.0
 FakeMSS.mode = "solid"
 FakeMSS.colour = (40, 80, 200)
-m.COLOR_ALGO = "mean"
+m.COLOUR_BLEND = 0.0
 w = threading.Thread(target=m.capture_loop, daemon=True)
 p = threading.Thread(target=m.sender_loop, daemon=True)
 w.start()
@@ -637,14 +638,15 @@ print("bind ok: loopback default, URL rejected, port out of range rejected, rest
 
 # --- input validation: never convert a bad value silently ------------------
 _keep = {n: getattr(m, n) for n in ("DRY_RUN", "TRANSITION", "CAPTURE_FPS", "HUE_BINS",
-                                    "COLOR_ALGO", "HA_URL")}
+                                    "COLOUR_BLEND", "HA_URL")}
 m.DRY_RUN = True
 applied, errors = m.apply_settings({"DRY_RUN": None})
 assert errors and m.DRY_RUN is True, (errors, m.DRY_RUN)      # a null must not disarm it
 assert m.apply_settings({"CAPTURE_FPS": True})[1], "a bool is not a number"
 assert m.apply_settings({"HUE_BINS": float("inf")})[1], "inf must be rejected"
 assert m.apply_settings({"CAPTURE_FPS": 9999})[1], "out of range must be rejected, not clamped"
-assert m.apply_settings({"COLOR_ALGO": "nope"})[1], "bad enum must be rejected"
+assert m.apply_settings({"SEND_MODE": "nope"})[1], "bad enum must be rejected"
+assert m.apply_settings({"COLOUR_BLEND": 1.5})[1], "an out-of-range blend must be rejected"
 _orig_url_test = m.HA_URL
 assert m.apply_settings({"TRANSITION": 0.4})[0].get("TRANSITION") == "0.4", "strings may stringify"
 m.HA_URL = _orig_url_test
@@ -655,10 +657,10 @@ _r = m.post_config({"reset": "false"})          # literal "false" means false
 assert _r.get("ok") is True and _r.get("applied") == {}, ("string false must not reset", _r)
 _p = m.post_config([1, 2, 3])
 assert getattr(_p, "status_code", 400) == 400 and b"payload must be an object" in _p.body
-_p = m.post_config({"COLOR_ALGO": "mean", "persist": False})
+_p = m.post_config({"COLOUR_BLEND": 0.0, "persist": False})
 assert _p.get("ok") is True, ("flat body with a control flag", _p)
-assert m.COLOR_ALGO == "mean"
-_p = m.post_config({"settings": {"COLOR_ALGO": "dominant"}, "persist": "no"})
+assert m.COLOUR_BLEND == 0.0
+_p = m.post_config({"settings": {"COLOUR_BLEND": 1.0}, "persist": "no"})
 assert _p.get("ok") is True and _p.get("persisted") is False, _p
 for _n, _v in _keep.items():
     setattr(m, _n, _v)                      # leave the process as this phase found it
@@ -865,7 +867,7 @@ assert "POST_INTERVAL_FLOOR" in _report["applied"], _report["applied"]
 m.DRY_RUN = True
 assert m.autotune(verbose=False, per_step=1)["ok"] is False
 (m.DRY_RUN, m.HA_TOKEN, m.check_ha, m._post, m.restore_light, m.session) = _keep_env
-m.DOMINANT_MIX = m.DOMINANT_MIX          # no-op, keeps the phase boundary obvious
+m.COLOUR_BLEND = m.COLOUR_BLEND          # no-op, keeps the phase boundary obvious
 print(f"autotune ok: picked {_report['floor']:.2f}-{_report['ceiling']:.2f} s "
       f"(rejected at {_report['busy_at_ms']} ms), light restored")
 
@@ -1316,7 +1318,8 @@ _cfg_path.write_text(_json.dumps({"CAPTURE_FPS": 7.5, "ligths": 3, "COLOR_ALGO":
 _keep_loaded = m.CONFIG_LOADED
 m.CONFIG_LOADED = False
 m.load_config_file(_cfg_path)
-assert m.CAPTURE_FPS == 7.5 and m.COLOR_ALGO == "mean", (m.CAPTURE_FPS, m.COLOR_ALGO)
+assert m.CAPTURE_FPS == 7.5, m.CAPTURE_FPS
+assert m.COLOUR_BLEND == 0.0, "a legacy COLOR_ALGO=mean in the file must become blend 0"
 m.CONFIG_LOADED = _keep_loaded
 print("partial config load ok: unknown keys warned, valid settings applied")
 
@@ -1431,23 +1434,23 @@ print("help text ok: hue bins explains its effect and its range")
 # --- edits apply live but only Save writes the file -----------------------
 import pathlib as _pathlib
 _cfg = _pathlib.Path(tempfile.mkdtemp()) / "config.json"
-_orig_cfg, _orig_mix = m.CONFIG_PATH, m.DOMINANT_MIX
+_orig_cfg, _orig_mix = m.CONFIG_PATH, m.COLOUR_BLEND
 m.CONFIG_PATH = _cfg
-m.post_config({"settings": {"DOMINANT_MIX": 0.25}})          # persisted baseline
-_baseline = _json.loads(_cfg.read_text())["DOMINANT_MIX"]
+m.post_config({"settings": {"COLOUR_BLEND": 0.25}})          # persisted baseline
+_baseline = _json.loads(_cfg.read_text())["COLOUR_BLEND"]
 assert _baseline == 0.25 and m.get_config()["unsaved"] is False
 
-_live = m.post_config({"settings": {"DOMINANT_MIX": 0.9}, "persist": False})
+_live = m.post_config({"settings": {"COLOUR_BLEND": 0.9}, "persist": False})
 assert _live["persisted"] is False
-assert m.DOMINANT_MIX == 0.9, "a live edit must reach the running process"
-assert _json.loads(_cfg.read_text())["DOMINANT_MIX"] == 0.25, "live edit must not touch the file"
+assert m.COLOUR_BLEND == 0.9, "a live edit must reach the running process"
+assert _json.loads(_cfg.read_text())["COLOUR_BLEND"] == 0.25, "live edit must not touch the file"
 assert m.get_config()["unsaved"] is True
-assert m.get_config()["saved_settings"]["DOMINANT_MIX"] == 0.25
+assert m.get_config()["saved_settings"]["COLOUR_BLEND"] == 0.25
 
-m.post_config({"settings": {"DOMINANT_MIX": 0.9}})           # now persist
-assert _json.loads(_cfg.read_text())["DOMINANT_MIX"] == 0.9
+m.post_config({"settings": {"COLOUR_BLEND": 0.9}})           # now persist
+assert _json.loads(_cfg.read_text())["COLOUR_BLEND"] == 0.9
 assert m.get_config()["unsaved"] is False
-m.CONFIG_PATH, m.DOMINANT_MIX = _orig_cfg, _orig_mix
+m.CONFIG_PATH, m.COLOUR_BLEND = _orig_cfg, _orig_mix
 print("live apply ok: applies without writing, Save persists, Revert has a target")
 
 # --- advanced sections and settings that only apply in some modes ---------
@@ -1456,9 +1459,12 @@ _advanced = [n for n, v in _meta.items() if v.get("advanced")]
 assert len(_advanced) >= 15, _advanced
 assert _meta["HUE_BINS"].get("advanced") is True
 assert _meta["SEND_MODE"].get("advanced") is True
-assert _meta["COLOR_ALGO"].get("advanced") is not True, "the everyday knob must stay visible"
+assert _meta["COLOUR_BLEND"].get("advanced") is not True, "the everyday knob must stay visible"
+assert _meta["CAPTURE_FPS"].get("advanced") is True, "capture rate belongs in Advanced"
+assert _meta["COLOR_ALGO"].get("hidden") is True, "the old enum must not render"
+assert list(_meta["COLOUR_BLEND"]["ends"]) == ["mean", "dominant"], _meta["COLOUR_BLEND"]["ends"]
 assert _meta["SATURATION_GAIN"]["show_if"] == {"SATURATION_BOOST": True}
-assert _meta["HUE_BINS"]["show_if"] == {"COLOR_ALGO": "dominant"}
+assert _meta["HUE_BINS"]["show_if"] == {"COLOUR_BLEND": {"$gt": 0.001}}
 assert "CHROMA_FLOOR" in _advanced and "TRANSITION" in _advanced
 print(f"advanced ok: {len(_advanced)} of {len(_meta)} settings collapsed, dependencies expressed")
 
@@ -1466,7 +1472,7 @@ print(f"advanced ok: {len(_advanced)} of {len(_meta)} settings collapsed, depend
 _orig_port = m.BIND_PORT
 _now = m.settings_snapshot()
 _first = m.post_config({"settings": {"BIND_PORT": _now["BIND_PORT"],
-                                    "COLOR_ALGO": _now["COLOR_ALGO"]}})
+                                    "COLOUR_BLEND": _now["COLOUR_BLEND"]}})
 assert _first["restart_required"] == [], _first["restart_required"]
 assert _first["applied"] == {}, _first["applied"]
 _second = m.post_config({"settings": {"BIND_PORT": 8123}})
@@ -1557,10 +1563,10 @@ print("crop ok: full %sx%s, left column %sx%s, centre %sx%s"
          rect_c["width"], rect_c["height"]))
 
 # --- phase I: letterboxed screen in dominant mode still ships ------------
-m.COLOR_ALGO = "dominant"
+m.COLOUR_BLEND = 1.0
 run_phase(0.8, mode="bars", colour=(200, 90, 30))
 assert POSTS, "dominant mode with black bars posted nothing (frame errors?)"
-m.COLOR_ALGO = "mean"
+m.COLOUR_BLEND = 0.0
 print("phase I: black bars + dominant -> %d posts, last %s" % (len(POSTS), POSTS[-1][1]["xy_color"]))
 
 # --- phase J: a read timeout is a radio stall, not "HA unreachable" -------

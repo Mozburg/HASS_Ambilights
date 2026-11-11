@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.2.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.2.2** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -216,6 +216,11 @@ These cost the most time, so they're documented up front:
   188, not 128.
 - **Never call `mss`'s `shot.rgb`** — it's a 24 MB strided copy (44 ms/frame at 4K).
   Read the BGRA buffer as a numpy view and let PIL decode `BGRX`.
+- **Clear `CAPTUREBLT` before grabbing.** mss always sets it, and at capture rates the
+  flag makes the hardware cursor flicker and jump to the top-left corner in step with
+  the loop on many Windows drivers ([python-mss #179](https://github.com/BoboTiG/python-mss/issues/179)).
+  `disable_captureblt()` zeroes the constant before the first grab; layered overlays
+  may then be missing from the mirrored image.
 - **The device ack, not HTTP, is the latency.** Transport is ~4 ms; a single Zigbee
   spotlight takes ~121 ms per command while a group takes ~37 ms on a test ZHA mesh.
   Dispatch a cycle

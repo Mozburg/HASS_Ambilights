@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 
 # ---------------------------------------------------------------- config ----
@@ -2980,8 +2980,38 @@ def grid_from_shot(shot, size: tuple[int, int] | None = None) -> np.ndarray:
     return np.asarray(img.resize(size, Image.Resampling.BOX), dtype=np.uint8)
 
 
+def disable_captureblt(gdi_module=None) -> bool:
+    """Drop CAPTUREBLT from mss's BitBlt on Windows.
+
+    mss always asks for layered windows (`SRCCOPY | CAPTUREBLT`). At capture
+    rates that flag makes the hardware cursor flicker and jump on many Windows
+    setups - the pointer blinks to the top-left corner in step with the capture
+    loop (python-mss issue #179). The flag is a module-level constant that
+    grab() reads on every call, so zeroing it is enough and needs no fork.
+
+    Returns True when the constant was changed.
+    """
+    if gdi_module is None:
+        if os.name != "nt":
+            return False
+        try:
+            from mss.windows import gdi as gdi_module
+        except Exception:                     # older mss: one windows module
+            try:
+                import mss.windows as gdi_module
+            except Exception as exc:
+                log.debug("could not reach the Windows capture backend: %s", exc)
+                return False
+    if not getattr(gdi_module, "CAPTUREBLT", 0):
+        return False
+    gdi_module.CAPTUREBLT = 0
+    log.info("capturing without CAPTUREBLT (stops the Windows cursor flicker)")
+    return True
+
+
 def capture_loop() -> None:
     interval = 1.0 / CAPTURE_FPS if CAPTURE_FPS > 0 else 0.5
+    disable_captureblt()
     try:
         grabber = mss()
     except Exception as exc:                     # no display / permissions
@@ -3549,6 +3579,7 @@ def start_server(host: str, port: int):
     config = uvicorn.Config(app, host=host, port=port, log_level="warning", log_config=None)
     server = uvicorn.Server(config)
     server.install_signal_handlers = lambda: None      # not the main thread
+    ACTIVE_SERVER["server"] = server
     thread = threading.Thread(target=server.run, name="uvicorn", daemon=True)
     thread.start()
     return thread, server
@@ -3568,10 +3599,47 @@ def wait_for_server(url: str, timeout: float = 15.0) -> bool:
 
 
 TRAY_ICON: dict = {}
+ACTIVE_SERVER: dict = {}
+QUITTING = threading.Event()
+
+
+def request_shutdown() -> None:
+    """Ask the embedded server and the capture/send threads to stop."""
+    QUITTING.set()
+    stop_event.set()
+    server = ACTIVE_SERVER.get("server")
+    if server is not None:
+        try:
+            server.should_exit = True
+        except Exception:                     # a half-built server is not fatal
+            log.debug("could not stop the server", exc_info=True)
+
+
+def force_exit_soon(delay: float = 2.0) -> None:
+    """Leave the process even if a GUI backend refuses to unwind its loop.
+
+    WebView2 and the pystray message loop can keep non-daemon threads alive after
+    the window is gone, which leaves HassAmbilights.exe in Task Manager with no
+    window and no tray icon. The graceful stop runs first; this is the backstop.
+    """
+
+    def _die() -> None:
+        os._exit(0)
+
+    timer = threading.Timer(delay, _die)
+    timer.daemon = True
+    timer.start()
 
 
 def _hide_instead_of_close(window) -> bool:
-    """Cancel the close and hide. Returning False is how pywebview vetoes it."""
+    """Cancel the close and hide. Returning False is how pywebview vetoes it.
+
+    While quitting the veto must not apply: pywebview's destroy() closes the
+    window through the same FormClosing event, so vetoing it left the process
+    (and its hidden window) running after tray -> Quit.
+    """
+    if QUITTING.is_set():
+        return True                           # do not cancel: this close is the quit
     try:
         window.hide()
     except Exception as exc:                  # no window backend: let it close
@@ -3618,13 +3686,18 @@ def start_tray_for_window(window, url: str) -> None:
             webbrowser.open(url)
 
     def quit_app(_icon=None, _item=None):
+        request_shutdown()
         icon = TRAY_ICON.get("icon")
         if icon is not None:
-            icon.stop()
+            try:
+                icon.stop()
+            except Exception:
+                log.debug("could not stop the tray icon", exc_info=True)
         try:
             window.destroy()
         except Exception:
-            pass
+            log.debug("could not destroy the window", exc_info=True)
+        force_exit_soon()
 
     icon = build_tray(show_settings, quit_app)
     if icon is not None:
@@ -3674,9 +3747,14 @@ def run_tray(url: str) -> int:
         webbrowser.open(url)
 
     def quit_app(_icon=None, _item=None):
+        request_shutdown()
         icon = TRAY_ICON.get("icon")
         if icon is not None:
-            icon.stop()
+            try:
+                icon.stop()
+            except Exception:
+                log.debug("could not stop the tray icon", exc_info=True)
+        force_exit_soon()
 
     icon = build_tray(open_settings, quit_app)
     if icon is None:
@@ -3794,10 +3872,16 @@ def main() -> None:
     try:
         code = run_window(url) if mode == "window" else run_tray(url)
     finally:
-        server.should_exit = True
-        stop_event.set()
+        request_shutdown()
         thread.join(timeout=5)
-    raise SystemExit(code)
+    # A GUI close can leave WebView2 / pystray threads holding the interpreter
+    # open after every window is gone; leave the process deterministically.
+    for _handler in logging.getLogger().handlers:
+        try:
+            _handler.flush()
+        except Exception:
+            pass
+    os._exit(code)
 
 
 if __name__ == "__main__":

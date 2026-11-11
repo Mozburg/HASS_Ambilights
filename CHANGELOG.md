@@ -8,6 +8,20 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-11-11
+
+### Added
+- **The light picker is grouped by Home Assistant area.** Each area is an `<optgroup>`
+  with its light count, lights with no area come last without a heading, and the row shows
+  how many lights and areas were found. Areas come from one `/api/template` render
+  (`area_name()`), because the REST API exposes no area registry — and it resolves device
+  areas as well as entity ones. If that call is refused the picker still lists every
+  light, just ungrouped.
+
+### Changed
+- Within an area, colour-capable lights still sort first; across areas, the order is
+  alphabetical so a room's lights stay together.
+
 ## [2.5.0] — 2026-11-11
 
 ### Added

@@ -48,8 +48,19 @@ class MockHA(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST_template(self, body):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         global BUSY_LEFT, FAIL_POSTS
+        if self.path.startswith("/api/template"):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            return self.do_POST_template(
+                b"light.desk_lamp=Office\nlight.plain_bulb=Living Room\n"
+                b"light.attic=\nlight.unassigned_one=\n")
         if FAIL_POSTS > 0:
             FAIL_POSTS -= 1
             self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -1352,11 +1363,19 @@ m.LIGHTS_CACHE.update({"at": 0.0, "data": None})
 _picker = m.get_lights()
 assert _picker["ok"] and _picker["count"] == 3, _picker          # switch.* excluded
 _ids = [l["entity_id"] for l in _picker["lights"]]
-assert _ids[0] == "light.desk_lamp", _ids                        # colour-capable first
+_grouped = {}
+for _l in m.get_lights(refresh=True)["lights"]:
+    _grouped.setdefault(_l["area"], []).append(_l)
+for _area, _members in _grouped.items():
+    assert [b["color_capable"] for b in _members] == sorted(
+        (b["color_capable"] for b in _members), reverse=True), (_area, _members)
 assert set(_ids) == {"light.desk_lamp", "light.plain_bulb", "light.attic"}
-assert _picker["lights"][0]["color_capable"] is True
-assert _picker["lights"][1]["color_capable"] is False
-assert _picker["lights"][1]["name"] == "attic", "missing friendly_name falls back to the id"
+_office = [l for l in _picker["lights"] if l["area"] == "Office"]
+_living = [l for l in _picker["lights"] if l["area"] == "Living Room"]
+assert [l["color_capable"] for l in _office] == [True], _office
+assert [l["color_capable"] for l in _living] == [False], _living
+assert any(l["name"] == "attic" for l in _picker["lights"]), \
+    "missing friendly_name falls back to the id"
 assert any(a == "Bearer picker-token" for a in GET_AUTH), "state fetch must send the token"
 
 _count = GET_COUNT
@@ -1370,6 +1389,36 @@ assert _no_token["ok"] is False and "token" in _no_token["detail"].lower()
 m.HA_TOKEN = _orig_token
 m.LIGHTS_CACHE.update({"at": 0.0, "data": None})
 print("picker ok: light.* only, colour-capable first, cached, refreshable")
+
+# --- the picker groups lights by area ---------------------------------------
+_listed = m.get_lights(refresh=True)
+_by_entity = {l["entity_id"]: l for l in _listed["lights"]}
+assert _by_entity["light.desk_lamp"]["area"] == "Office", _by_entity["light.desk_lamp"]
+assert _by_entity["light.plain_bulb"]["area"] == "Living Room"
+assert _by_entity["light.attic"]["area"] == "", "a light with no area must say so"
+assert _listed["areas"] == ["Living Room", "Office"], _listed["areas"]
+assert _listed["unassigned"] == 1, _listed["unassigned"]      # light.attic
+_areas_in_order = [l["area"] for l in _listed["lights"]]
+assert _areas_in_order == sorted(_areas_in_order, key=lambda a: (a == "", a.lower())), _areas_in_order
+print(f"areas ok: {_listed['areas']} then {_listed['unassigned']} without one, unassigned last")
+
+# a Home Assistant that cannot answer the template must not break the picker
+_keep_session = m.session
+
+
+class _NoTemplate:
+    status_code = 404
+    text = ""
+
+
+m.session = type("S", (), {"get": m.session.get,
+                           "post": staticmethod(lambda *a, **k: _NoTemplate())})()
+_fallback = m.get_lights(refresh=True)
+assert _fallback["ok"] and _fallback["count"] == 3, _fallback.get("count")
+assert all(l["area"] == "" for l in _fallback["lights"]), "no areas, but still a list"
+assert _fallback["areas"] == []
+m.session = _keep_session
+print("areas ok: a 404 from the template API still yields a usable list")
 
 # --- help text has to say what a knob does, not just name it --------------
 _meta = {m_entry["name"]: m_entry for m_entry in m.get_config()["meta"]}

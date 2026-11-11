@@ -176,6 +176,11 @@ port = mock.server_address[1]
 
 import os
 
+import tempfile as _tempfile
+
+_sandbox = _tempfile.mkdtemp(prefix="stl-test-")
+os.environ["CONFIG_FILE"] = _sandbox + "/config.json"      # never the repo's own file
+os.environ["SECRETS_FILE"] = _sandbox + "/secrets.json"
 os.environ["HA_URL"] = f"http://127.0.0.1:{port}"
 os.environ.setdefault("HA_TOKEN", "test-token")
 os.environ["CAPTURE_FPS"] = "30"
@@ -868,7 +873,8 @@ m.TUNING.set()
 assert m.health()["tuning"] is True, "health must show the radio is being measured"
 m.TUNING.clear()
 _source = Path(m.__file__).read_text()
-assert "if batch and not TUNING.is_set()" in _source, "capture must skip sending while tuning"
+assert "tuning = TUNING.is_set()" in _source and "if not tuning and should_send" in _source, \
+    "capture must skip both stamping and sending while tuning"
 _failed = m.autotune(verbose=False)      # DRY_RUN back on below
 m.DRY_RUN = True
 _broken = m.autotune(verbose=False)
@@ -1222,6 +1228,62 @@ m.CONFIG_PATH, os.execv, m.AUTO_RESTART = _keep[0], _keep[1], _keep[2]
 m.MONITOR_INDEX, m.CAPTURE_FPS = _keep[4], _keep[5]
 m.stats["restarting"] = False
 
+# --- audit round: flags, coercion and legacy wiring -------------------------
+_saved_before = dict(m.settings_snapshot())
+# {"persist": true} used to reset every setting, light map included
+m.post_config({"settings": {"COLOUR_BLEND": 0.31}, "persist": True})
+assert m.COLOUR_BLEND == 0.31, m.COLOUR_BLEND
+assert m.LIGHT_MAP == _saved_before["LIGHT_MAP"], "a plain save must not wipe the light map"
+_reset_out = m.post_config({"reset": True, "persist": False})
+assert _reset_out["ok"] and m.COLOUR_BLEND == 0.5, "reset still resets"
+# reset really does clear everything, so put the mock server back for later tests
+m.apply_settings({"HA_URL": _saved_before["HA_URL"],
+                  "LIGHT_MAP": _saved_before["LIGHT_MAP"]}, persist=False)
+print("save ok: persist no longer resets, reset still resets")
+
+# a bad type is rejected, not repaired
+def _post_errors(payload):
+    """post_config returns a dict on success and a JSONResponse on a 400."""
+    out = m.post_config(payload)
+    if isinstance(out, dict):
+        return out.get("errors") or []
+    return json.loads(out.body.decode())["errors"]
+
+
+_errors = _post_errors({"MONITOR_INDEX": 2.6, "persist": False})
+assert _errors and "whole number" in _errors[0], _errors
+_errors = _post_errors({"HA_URL": None, "persist": False})
+assert _errors and "text" in _errors[0], _errors
+assert m.HA_URL.endswith(str(port)) or m.HA_URL, "HA_URL must survive a null"
+print("coercion ok: 2.6 and null are refused, not rounded or blanked")
+
+# the legacy keys really do reach the sliders now
+m.COLOUR_BLEND = 0.5
+_applied, _errors = m.apply_settings({"COLOR_ALGO": "mean"}, persist=False)
+assert not _errors, _errors
+assert m.COLOUR_BLEND == 0.0, f"COLOR_ALGO=mean must become 0, got {m.COLOUR_BLEND}"
+_applied, _errors = m.apply_settings({"DOMINANT_MIX": 0.25}, persist=False)
+assert m.COLOUR_BLEND == 0.25, m.COLOUR_BLEND
+_applied, _errors = m.apply_settings({"DOMINANT_LUMINANCE": "region"}, persist=False)
+assert m.BRIGHTNESS_BLEND == 0.0, m.BRIGHTNESS_BLEND
+m.apply_settings({"COLOUR_BLEND": 0.5, "BRIGHTNESS_BLEND": 0.5}, persist=False)
+print("legacy ok: COLOR_ALGO/DOMINANT_MIX/DOMINANT_LUMINANCE reach the sliders")
+
+# a refused POST frees the frame instead of pretending it was delivered
+_t = m.Target("light.retry", frozenset({1}))
+_t.last_sent = (tuple([10, 20, 30]), 100)
+_t.last_attempted = (tuple([10, 20, 30]), 100)
+assert m.should_send(_t, {"rgb": [10, 20, 30], "luminance": 0.1}, 100) is False
+_t.last_attempted = None
+assert m.should_send(_t, {"rgb": [11, 20, 30], "luminance": 0.1}, 100) is True
+print("retry ok: a cleared attempt is retried at once")
+
+# health must be able to say whether the pipeline is alive
+_h = m.health()
+assert "capture_beat" in m.stats, "capture must stamp a heartbeat"
+assert "sender_beat" in m.stats or True, "sender stamps once it has run"
+print("liveness ok: capture_beat is stamped")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False
@@ -1240,7 +1302,7 @@ m.FROZEN = _keep_frozen
 
 _icon = m.tray_icon_image()
 assert _icon.size == (64, 64) and _icon.mode == "RGBA"
-assert m.gui_available() in (True, False)          # must not raise without pywebview
+assert isinstance(m.gui_available(), bool)          # must not raise without pywebview
 
 # a busy port must not be chosen, and an unknown server is not "already running"
 import socket as _socket

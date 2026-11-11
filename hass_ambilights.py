@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.7.1"
+__version__ = "2.8.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -352,6 +352,18 @@ def redirect_std_streams() -> None:
         sys.stdout = stream
     if sys.stderr is None:
         sys.stderr = stream
+
+
+def repoint_log_streams() -> None:
+    """Re-aim the handlers logging.basicConfig created before the streams did.
+
+    basicConfig() runs at import, so in a --windowed exe it captured
+    sys.stderr is None; every record then logged a 9-line "Logging error"
+    traceback instead of the message.
+    """
+    for handler in logging.getLogger().handlers:
+        if type(handler) is logging.StreamHandler:
+            handler.setStream(sys.stderr)
 
 
 def setup_file_logging() -> None:
@@ -1807,13 +1819,21 @@ def _coerce(spec, value):
             raise ValueError("must be a number") from None
         if not math.isfinite(number):
             raise ValueError("must be a finite number")
-        out = int(round(number)) if kind == "int" else number
+        if kind == "int" and not float(number).is_integer():
+            raise ValueError("must be a whole number")
+        out = int(number) if kind == "int" else number
         low, high = spec.get("min"), spec.get("max")
         if low is not None and out < low:
             raise ValueError(f"must be at least {low}")
         if high is not None and out > high:
             raise ValueError(f"must be at most {high}")
         return out
+    if kind == "string":
+        # a null HA_URL used to become '' and break every later call silently;
+        # a number is a fair way to spell a numeric string ("TRANSITION": 0.4)
+        if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+            raise ValueError("must be text")
+        return value if isinstance(value, str) else str(value)
     return "" if value is None else str(value)
 
 
@@ -1898,11 +1918,22 @@ def _translate_legacy_colour(settings: dict) -> dict:
     return out
 
 
+SETTINGS_LOCK = threading.RLock()      # re-entrant: the loader applies from startup too
+
+
 def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]]:
     """Validate, apply at runtime and (optionally) persist. Never partial-applies."""
-    global TARGETS, GEOMETRY_REV
     if not isinstance(payload, dict):
         return {}, ["payload must be an object"]
+    # old COLOR_ALGO/DOMINANT_MIX/DOMINANT_LUMINANCE become the sliders here - the
+    # helper existed since 2.7.0 but nothing ever called it
+    payload = _translate_legacy_colour(payload)
+    with SETTINGS_LOCK:                # two saves must not lose one setting
+        return _apply_settings_locked(payload, persist)
+
+
+def _apply_settings_locked(payload: dict, persist: bool = True) -> tuple[dict, list[str]]:
+    global TARGETS, GEOMETRY_REV
     new: dict = {}
     errors: list[str] = []
     for name, raw in payload.items():
@@ -1989,8 +2020,8 @@ def apply_settings(payload: dict, persist: bool = True) -> tuple[dict, list[str]
     if "LIGHT_MAP" in new:
         TARGETS = parse_light_map(new["LIGHT_MAP"])
         GEOMETRY_REV += 1
-    if persist:
-        persist_config()
+    if persist and persist_config() is False:
+        errors.append("could not write the config file - nothing was saved")
     return new, []
 
 
@@ -2621,6 +2652,12 @@ def _sender_loop() -> None:
             continue
 
         started = time.perf_counter()
+        # snapshot what each entity was stamped with: capture may re-stamp
+        # last_attempted while the POST is in flight, and re-reading it afterwards
+        # marks a frame as delivered that never left
+        posted = {entity: by_entity[entity].last_attempted
+                  for _body, entities in groups for entity in entities
+                  if entity in by_entity}
         if SEND_CONCURRENCY and len(groups) > 1:
             results = post_concurrently([body for body, _ in groups])
         else:
@@ -2676,7 +2713,7 @@ def _sender_loop() -> None:
                             stats["interval_ms"] = round(
                                 per_light_ms if prev is None else 0.7 * prev + 0.3 * per_light_ms, 1)
                     target.posts += 1
-                    target.last_sent = target.last_attempted
+                    target.last_sent = posted.get(entity, target.last_attempted)
                     target.last_success_mono = now_mono
                 if streak >= 3 and FIXED_POST_INTERVAL <= 0:
                     pace = max(max(POST_INTERVAL_FLOOR, 1.0 / CAPTURE_FPS), pace * 0.95)
@@ -2690,7 +2727,7 @@ def _sender_loop() -> None:
                     if target is not None:
                         target.busy += 1
                         # definitely not applied: let the next frame retry at once
-                        target.last_attempted = target.last_sent
+                        target.last_attempted = None
                 pace = min(POST_INTERVAL_CEILING, pace * 1.3)
                 now = time.time()
                 if now - _last_error_log > 30:
@@ -2703,6 +2740,7 @@ def _sender_loop() -> None:
                     target = by_entity.get(entity)
                     if target is not None:
                         target.busy += 1
+                stats["busy"] += 1
                 note_radio_stall(response.text.strip()[:120])
             else:
                 stats["errors"] += 1
@@ -2711,7 +2749,8 @@ def _sender_loop() -> None:
                     target = by_entity.get(entity)
                     if target is not None:
                         target.errors += 1
-                        target.last_attempted = target.last_sent   # refused: retry freely
+                        target.last_attempted = None    # refused: retry freely
+                        target.last_sent = target.last_sent
                 note_failure()
                 now = time.time()
                 if now - _last_error_log > 30:
@@ -2736,7 +2775,13 @@ def restore_light(restore: dict, attempts: int = 3) -> bool:
         return True
     restore = {**restore, "transition": 0}   # a ramp makes the group drop mode changes
     for _ in range(attempts):
-        _post(restore)
+        try:
+            _post(restore)
+        except requests.RequestException as exc:
+            # one unreachable light must not abort the rest of the restore loop
+            log.warning("restore of %s failed: %s", restore.get("entity_id"), exc)
+            time.sleep(0.2)
+            continue
         time.sleep(0.6)
         try:
             attrs = session.get(f"{HA_URL}/api/states/{restore['entity_id']}", headers=auth_headers(), timeout=5).json().get("attributes", {})
@@ -3232,6 +3277,10 @@ def capture_loop() -> None:
                 "zones": [dict(c, preview=preview_colour(c)) for c in zone_colours],
                 "full": dict(aggregate(lin), preview=preview_colour(aggregate(lin))),
             }
+            # While the tuner owns the radio nothing here is sent, so nothing here
+            # may be stamped either: a stamped-but-dropped frame suppresses the
+            # same colour for RESEND_AFTER once the tune ends.
+            tuning = TUNING.is_set()
             batch: dict[str, dict] = {}
             light_report: dict[str, dict] = {}
             for target in TARGETS:
@@ -3244,7 +3293,7 @@ def capture_loop() -> None:
                 colour["preview"] = preview_colour(colour)
                 light_report[target.entity_id] = colour
                 brightness = brightness_for_colour(colour)
-                if should_send(target, colour, brightness):
+                if not tuning and should_send(target, colour, brightness):
                     batch[target.entity_id] = colour
                     # record it now: the sender may not post for a few ms, and
                     # dedupe has to hold for that window too
@@ -3258,7 +3307,8 @@ def capture_loop() -> None:
 
             last_eval = time.perf_counter()
             stats["frames"] += 1
-            if batch and not TUNING.is_set():   # auto tune is measuring: stay off the radio
+            stats["capture_beat"] = time.time()
+            if batch:                            # auto tune is measuring: stay off the radio
                 send_to_ha(batch)
         except Exception as exc:                 # never let one bad frame kill the thread
             stats["frame_errors"] += 1
@@ -3442,6 +3492,15 @@ def health():
         "dry_run": DRY_RUN,
         # raw_grid is a numpy array (serialised lazily); bool(array) raises
         "tuning": TUNING.is_set(),
+        # liveness: a dead capture or sender thread used to look healthy
+        "capture_beat": stats.get("capture_beat"),
+        "sender_beat": stats.get("sender_beat"),
+        "pipeline_ok": bool(
+            stats.get("capture_beat") is not None
+            and time.time() - (stats.get("capture_beat") or 0) < 5
+            and stats.get("sender_beat") is not None
+            and time.time() - (stats.get("sender_beat") or 0) < 5),
+        "restart_failed": RESTART_FAILED,
         "restarting": stats.get("restarting", False),
         "has_frame": bool(len(latest_data["raw_grid"])) if latest_data["raw_grid"] is not None else False,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
@@ -3579,7 +3638,6 @@ def get_config():
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "restart_required": [s["name"] for s in SETTINGS if s.get("restart")],
         "config_exists": CONFIG_PATH.exists(),
-        "ha_url": HA_URL,
         "ha_token_set": bool(HA_TOKEN),
         # what a Save would write: lets Revert restore the file, and lets a
         # page load say "these values are live but unsaved"
@@ -3637,15 +3695,19 @@ def post_config(payload: Any = Body(...)):
     before = settings_snapshot()
     before_token = HA_TOKEN
     persist = True
+    reset = False
     for flag in ("reset", "persist"):
-        if flag in payload:
-            value, problem = _control_flag(payload, flag)
-            if problem:
-                return JSONResponse({"ok": False, "errors": [problem]}, status_code=400)
-            if flag == "persist":
-                persist = value
+        if flag not in payload:
+            continue
+        value, problem = _control_flag(payload, flag)
+        if problem:
+            return JSONResponse({"ok": False, "errors": [problem]}, status_code=400)
+        # one loop variable for both flags made {"persist": true} wipe every
+        # setting, light map included
+        if flag == "reset":
             reset = value
-    reset = locals().get("reset", False)
+        else:
+            persist = value
     # a flat body is fine, but its control keys are ours, not settings
     settings = payload.get("settings", {k: v for k, v in payload.items()
                                         if k not in ("reset", "persist", "settings")})
@@ -3690,6 +3752,7 @@ def post_config(payload: Any = Body(...)):
             "restart_required": restart_required, "restarting": restarted}
 
 
+RESTART_FAILED: str | None = None       # why the last restart did not happen
 AUTO_RESTART = (_env("AUTO_RESTART", "1") != "0"
                 and not os.environ.get("HASS_AMBILIGHTS_NO_RESTART"))
 RESTART_MARKER = ("restart_guard", )
@@ -3747,8 +3810,14 @@ def restart_self(reason: str = "", delay: float = 0.8) -> bool:
         try:
             os.execv(argv[0], argv)
         except Exception as exc:
+            global RESTART_FAILED
+            RESTART_FAILED = str(exc)
             log.error("could not restart (%s) - start the app again to apply %s", exc, reason)
             stats["restarting"] = False
+            try:
+                _restart_guard_path().unlink()      # do not block the next attempt
+            except OSError:
+                pass
 
     threading.Timer(delay, go).start()
     return True
@@ -4095,6 +4164,7 @@ def _run() -> None:
 
     redirect_std_streams()
     setup_file_logging()
+    repoint_log_streams()
     make_dpi_aware()                     # before any window or capture exists
     log.info("HASS Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
     # The guard records the last auto restart. A process that lives past the window
@@ -4109,7 +4179,9 @@ def _run() -> None:
             pass
 
     _expire_restart_guard()
-    threading.Timer(31, _expire_restart_guard).start()
+    guard_timer = threading.Timer(31, _expire_restart_guard)
+    guard_timer.daemon = True          # a non-daemon timer kept the app alive 31 s
+    guard_timer.start()
     splash_text("loading settings")
 
     load_secrets()
@@ -4123,6 +4195,11 @@ def _run() -> None:
         url = f"http://{host}:{existing}/"
         log.info("HASS Ambilights is already running at %s", url)
         close_splash()
+        if mode == "server":
+            # under systemd a 0 exit means "started fine", so the unit would sit
+            # inactive while nothing new is served: say so with a failure code
+            log.error("another instance is already serving %s - exiting", url)
+            raise SystemExit(3)
         if mode == "window" and gui_available():
             run_window(url)
         else:

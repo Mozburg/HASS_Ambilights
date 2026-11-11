@@ -878,6 +878,12 @@ _win = _FakeWindow()
 assert m._hide_instead_of_close(_win) is False, "close must be vetoed"
 assert _win.hidden == 1, "window must be hidden"
 
+# The same handler also sees the close that destroy() causes during Quit. If it
+# vetoes that one, the window never closes and the process stays in Task Manager.
+m.QUITTING.set()
+assert m._hide_instead_of_close(_FakeWindow()) is True, "quit must not be vetoed"
+m.QUITTING.clear()
+
 _dead = _FakeWindow(can_hide=False)
 assert m._hide_instead_of_close(_dead) is True, "no backend: allow the close"
 print("tray: closing hides the window, and falls back to closing without a backend")
@@ -920,6 +926,21 @@ _keep_tray_icon = dict(m.TRAY_ICON)
 m.TRAY_ICON.clear()
 
 _win = _FakeWindow()
+
+
+class _FakeServer:
+    def __init__(self):
+        self.should_exit = False
+
+
+_srv = _FakeServer()
+_keep_active = dict(m.ACTIVE_SERVER)
+_keep_stop = m.stop_event.is_set()
+m.ACTIVE_SERVER["server"] = _srv
+_forced = []
+_keep_force = m.force_exit_soon
+m.force_exit_soon = lambda delay=2.0: _forced.append(delay)
+
 m.start_tray_for_window(_win, "http://127.0.0.1:8000/")
 time.sleep(0.15)
 assert _FAKE_ICONS, "no tray icon created"
@@ -933,7 +954,19 @@ assert _win.hidden == -1, "Open settings must show the window"
 _icon.menu.items[1].action()
 assert _win.destroyed == 1, "Quit must destroy the window"
 assert _icon.stopped == 1, "Quit must stop the tray icon"
+assert m.QUITTING.is_set(), "Quit must release the close veto"
+assert _srv.should_exit, "Quit must stop the embedded server"
+assert _forced, "Quit must arm the forced exit for a backend that will not unwind"
 print("tray: Open settings shows the window, Quit destroys it and stops the icon")
+
+m.force_exit_soon = _keep_force
+m.ACTIVE_SERVER.clear()
+m.ACTIVE_SERVER.update(_keep_active)
+m.QUITTING.clear()
+if _keep_stop:
+    m.stop_event.set()
+else:
+    m.stop_event.clear()
 
 m.TRAY_ICON.clear()
 m.TRAY_ICON.update(_keep_tray_icon)
@@ -1010,6 +1043,18 @@ _child = _subprocess.run(
 assert _child.returncode == 0, _child.stderr[-400:]
 assert _log_path.exists() and "written after redirect" in _log_path.read_text(), \
     "a windowed run must write where it can be read"
+
+# --- windows cursor flicker (mss CAPTUREBLT) ------------------------------
+class _Gdi:
+    CAPTUREBLT = 0x40000000
+
+
+_gdi = _Gdi()
+assert m.disable_captureblt(_gdi) is True, "CAPTUREBLT must be cleared"
+assert _gdi.CAPTUREBLT == 0, _gdi.CAPTUREBLT
+assert m.disable_captureblt(_gdi) is False, "already clear: nothing to do"
+assert m.disable_captureblt(object()) is False, "a backend without the constant is left alone"
+print("capture: CAPTUREBLT cleared so the Windows cursor does not flicker")
 
 # a closed port must be retried, not raised, and a dead one must time out
 assert m.wait_for_server("http://127.0.0.1:9/", timeout=0.6) is False

@@ -8,6 +8,21 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-11-11
+
+### Fixed
+- **Tray → Quit now actually exits the process.** pywebview closes a window through
+  the same `FormClosing` event that *Close to tray* vetoes, so `destroy()` hid the
+  window again and left `HassAmbilights.exe` running with no window and no tray icon —
+  only Task Manager could end it. Quit now releases the veto, stops the tray icon and
+  the embedded server, and arms a short backstop that exits the process if a GUI
+  backend refuses to unwind. The `--tray`-only mode gets the same backstop.
+- **The pointer no longer flickers to the top-left corner while capturing.** mss's
+  BitBlt always sets `CAPTUREBLT`, which makes the hardware cursor blink and jump in
+  step with the capture loop on many Windows drivers (python-mss issue #179). The flag
+  is cleared before the first grab, so the cursor stays put; layered overlays may no
+  longer show up in the mirror.
+
 ## [2.2.1] — 2026-11-10
 
 ### Changed

@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1427,7 +1427,8 @@ async function autotuneNow() {
   const howMany = LIGHTS.filter((l) => l.entity.trim()).length || 1;
   if (!confirm(`Auto tune sends a short burst of commands to all ${howMany} light`
              + `${howMany === 1 ? "" : "s"}, brightening and dimming them for about `
-             + "ten seconds, then picks the fastest pacing they accepted.\n\nContinue?")) return;
+             + "ten seconds, then picks the fastest pacing they accepted and matches "
+             + "the capture rate to it.\n\nContinue?")) return;
   $("autotune").disabled = true;
   status.textContent = "measuring…";
   try {
@@ -1444,6 +1445,7 @@ async function autotuneNow() {
         const lights = report.light_count || 0;
         const message = `✔ ${report.floor.toFixed(2)}–${report.ceiling.toFixed(2)} s`
           + (lights ? ` · ${lights} light${lights === 1 ? "" : "s"}` : "")
+          + (report.fps ? ` · ${report.fps} fps` : "")
           + (report.busy_at_ms ? ` (rejected at ${report.busy_at_ms} ms)` : " (no rejections)");
         await reload();                 // applied live; the badge asks you to save
         const fresh = $("autotunestatus");   // reload rebuilds the card
@@ -1576,7 +1578,7 @@ SETTINGS = [
           "pins it; 0 snaps.", advanced=True),
     _spec("POST_INTERVAL_FLOOR", "float", 0.15, "Sending", "Fastest pacing",
           "Minimum time between commands. Raise it if the Zigbee controller keeps resetting.",
-          min=0.05, max=1.0, step=0.01),
+          min=0.02, max=1.0, step=0.01),
     _spec("POST_INTERVAL_CEILING", "float", 0.6, "Sending", "Backoff ceiling",
           "Pacing is allowed to grow to this when the radio reports BUSY.",
           min=0.1, max=3.0, step=0.05),
@@ -2654,9 +2656,12 @@ CALIBRATION_LOCK = threading.Lock()
 
 
 AUTOTUNE_LOCK = threading.Lock()
-POST_INTERVAL_FLOOR_MIN = 0.10      # fastest the tuner will allow
-POST_INTERVAL_CEILING_MAX = 2.00
-AUTOTUNE_STEPS = (0.45, 0.35, 0.26, 0.20, 0.15, 0.12, 0.09, 0.07)
+POST_INTERVAL_FLOOR_MIN = 0.02      # a sanity clamp, not a design limit: the radio
+POST_INTERVAL_CEILING_MAX = 2.00                                    # decides the real one
+AUTOTUNE_STEPS = (0.45, 0.35, 0.26, 0.20, 0.15, 0.12, 0.09, 0.07, 0.05, 0.035, 0.025)
+TUNING = threading.Event()          # set while auto tune owns the radio
+AUTOTUNE_MIN_FPS = 4.0              # never set a capture rate the tuner cannot support
+AUTOTUNE_MAX_FPS = 30.0             # capture, colour work and the UI all share one core
 
 
 AUTOTUNE_COLOURS = ([255, 190, 110], [120, 180, 255], [255, 120, 150],
@@ -2717,6 +2722,8 @@ def autotune(verbose: bool = True, per_step: int = 4) -> dict:
         return report
 
     restores = _autotune_attrs(targets)
+    TUNING.set()                 # our own frames would compete with the probe
+    time.sleep(max(0.2, POST_INTERVAL_FLOOR * 2))
 
     def round_bodies(round_no: int) -> list[dict]:
         return [{"entity_id": t.entity_id,
@@ -2782,6 +2789,7 @@ def autotune(verbose: bool = True, per_step: int = 4) -> dict:
     finally:
         # the burst just filled the radio's queue, so wait at least as long as the
         # fastest interval we were willing to accept before putting the lights back
+        TUNING.clear()           # let normal sprinting resume before the restore
         gap = max(0.25, (accepted[-1] * 1.2) if accepted else 0.5)
         for _attempt in range(3):
             time.sleep(gap)
@@ -2799,11 +2807,21 @@ def autotune(verbose: bool = True, per_step: int = 4) -> dict:
     ceiling = min(max(floor * 4.0, 0.30), 2.0)
     floor = round(max(POST_INTERVAL_FLOOR_MIN, min(floor, POST_INTERVAL_CEILING_MAX)), 3)
     ceiling = round(max(ceiling, floor), 3)
-    report.update({"floor": floor, "ceiling": ceiling,
-                   "best_ms": round(floor * 1000)})
+
+    # One frame is one command per light, so the radio's pacing is a frame rate:
+    # capture faster than it can be sent and the extra frames are thrown away, so
+    # the capture rate follows the measurement rather than the other way round.
+    frames_per_second = 1.0 / floor
+    fps = round(max(AUTOTUNE_MIN_FPS, min(frames_per_second, AUTOTUNE_MAX_FPS)), 1)
+    idle = round(min(IDLE_FPS, max(0.5, fps / 3.0)), 1)
+    report.update({"floor": floor, "ceiling": ceiling, "fps": fps, "idle_fps": idle,
+                   "best_ms": round(floor * 1000),
+                   "fps_capped": frames_per_second > AUTOTUNE_MAX_FPS})
 
     applied, errors = apply_settings({"POST_INTERVAL_FLOOR": floor,
-                                      "POST_INTERVAL_CEILING": ceiling}, persist=False)
+                                      "POST_INTERVAL_CEILING": ceiling,
+                                      "CAPTURE_FPS": fps,
+                                      "IDLE_FPS": idle}, persist=False)
     report["applied"] = applied
     if errors:
         report["error"] = "; ".join(errors)
@@ -2812,6 +2830,8 @@ def autotune(verbose: bool = True, per_step: int = 4) -> dict:
     say(f"  -> {floor:.2f}-{ceiling:.2f} s between commands for {len(targets)} light(s) "
         + (f"(rejected at {report['busy_at_ms']} ms)" if report["busy_at_ms"]
            else "(no rejection seen)"))
+    say(f"  -> capturing at {fps} fps (idle {idle} fps)"
+        + (" - capped by this program, not the radio" if report["fps_capped"] else ""))
     return report
 
 
@@ -3108,7 +3128,7 @@ def capture_loop() -> None:
 
             last_eval = time.perf_counter()
             stats["frames"] += 1
-            if batch:
+            if batch and not TUNING.is_set():   # auto tune is measuring: stay off the radio
                 send_to_ha(batch)
         except Exception as exc:                 # never let one bad frame kill the thread
             stats["frame_errors"] += 1
@@ -3291,6 +3311,7 @@ def health():
         "send_mode": SEND_MODE,
         "dry_run": DRY_RUN,
         # raw_grid is a numpy array (serialised lazily); bool(array) raises
+        "tuning": TUNING.is_set(),
         "has_frame": bool(len(latest_data["raw_grid"])) if latest_data["raw_grid"] is not None else False,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "stats": dict(stats),

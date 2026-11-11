@@ -791,6 +791,61 @@ assert _put_back == {t.entity_id for t in _three}, _put_back
 assert _report["restored"] == 3, _report
 print(f"autotune: {_report['light_count']} lights probed "
       f"({len(_posts)} commands) and all restored")
+
+# the capture rate follows the pacing the radio accepted...
+assert _report["fps"], _report
+assert abs(_report["fps"] - 1.0 / _report["floor"]) <= 0.6, _report
+assert _report["applied"]["CAPTURE_FPS"] == _report["fps"], _report["applied"]
+assert _report["applied"]["IDLE_FPS"] <= _report["fps"], _report["applied"]
+assert m.CAPTURE_FPS == _report["fps"], m.CAPTURE_FPS
+print(f"autotune: capture rate set to {_report['fps']} fps for a "
+      f"{_report['floor']:.3f} s floor")
+
+# ...and a fast radio is allowed to be fast: no 0.1 s ceiling in the tuner
+_busy_below = 0.05
+_in_frame[0], _last_post[0] = 0, 0.0
+_fast = m.autotune(verbose=False, per_step=2)
+assert _fast["ok"], _fast
+assert _fast["floor"] < 0.10, f"pacing clamped again: {_fast['floor']}"
+assert _fast["busy_at_ms"] is None or _fast["busy_at_ms"] <= 50, _fast
+assert abs(_fast["fps"] - 1.0 / _fast["floor"]) <= 0.6, _fast
+assert m.POST_INTERVAL_FLOOR == _fast["floor"], m.POST_INTERVAL_FLOOR
+print(f"autotune: fast radio reached {_fast['floor']:.3f} s "
+      f"({_fast['fps']} fps), below the old 0.1 s clamp")
+
+# a very fast radio does not push the capture rate past what one core can do
+_busy_below = 0.005
+_in_frame[0], _last_post[0] = 0, 0.0
+_quick = m.autotune(verbose=False, per_step=1)
+assert _quick["ok"], _quick
+assert _quick["fps"] == m.AUTOTUNE_MAX_FPS, _quick
+assert _quick["fps_capped"] is True, _quick
+print(f"autotune: {_quick['floor']:.3f} s wants {1/_quick['floor']:.0f} fps, "
+      f"capped at {_quick['fps']}")
+
+# validation agrees with the tuner about how fast is allowed
+_applied, _errors = m.apply_settings({"POST_INTERVAL_FLOOR": 0.03}, persist=False)
+assert not _errors and _applied.get("POST_INTERVAL_FLOOR") == 0.03, (_applied, _errors)
+_applied, _errors = m.apply_settings({"POST_INTERVAL_FLOOR": 0.005}, persist=False)
+assert _errors and "at least" in _errors[0], _errors
+print("validity: 0.03 s accepted, 0.005 s refused")
+
+# the probe must own the radio: capture stays off it, and the flag never sticks
+assert m.health()["tuning"] is False, "a finished tune must leave the radio free"
+m.TUNING.set()
+assert m.health()["tuning"] is True, "health must show the radio is being measured"
+m.TUNING.clear()
+_source = Path(m.__file__).read_text()
+assert "if batch and not TUNING.is_set()" in _source, "capture must skip sending while tuning"
+_failed = m.autotune(verbose=False)      # DRY_RUN back on below
+m.DRY_RUN = True
+_broken = m.autotune(verbose=False)
+assert _broken["ok"] is False
+assert m.TUNING.is_set() is False, "a failed tune must not leave sending paused"
+m.DRY_RUN = False
+print("autotune: capture pauses while tuning and never stays paused")
+
+_busy_below = 0.18
 assert _report["restored"] and _restored, "the light must be put back"
 assert "POST_INTERVAL_FLOOR" in _report["applied"], _report["applied"]
 # a dry run has nothing to measure and must say so rather than pretend

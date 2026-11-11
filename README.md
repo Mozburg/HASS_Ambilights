@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.3.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.4.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -21,7 +21,8 @@ web UI for every knob, and a colour pipeline that actually matches the panel.
   lights are dispatched concurrently.
 - **Radio-aware sending** — pacing, BUSY backoff, coordinator-stall hold-off, and a
   host-down circuit breaker. **Auto tune** measures your mesh — every light at once, the
-  way a frame actually goes out — and picks the pacing instead of you guessing it.
+  way a frame actually goes out — picks the pacing instead of you guessing it, and sets
+  the capture rate to match what the radio accepted.
 
 ## Install
 

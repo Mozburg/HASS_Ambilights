@@ -8,6 +8,27 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-11-11
+
+### Changed
+- **Auto tune no longer stops at 0.1 s.** The tuner had its own floor of 100 ms, so a
+  controller that would happily take 40 ms was still paced at 100 ms. The clamp is now
+  20 ms (a sanity limit, not a design one) and the probe ladder runs down to 25 ms, so the
+  pacing reflects what the radio actually accepts.
+- **The capture rate follows the measurement.** One frame is one command per light, so the
+  pacing the radio accepted *is* a frame rate: it now sets `CAPTURE_FPS` (and lowers
+  `IDLE_FPS` if needed) instead of leaving capture at 12 fps feeding a radio that could
+  take 20 — or capturing 12 fps that a 4 fps radio throws away. Capped at 30 fps, because
+  capture, colour work and the UI share one core.
+- `POST_INTERVAL_FLOOR` accepts down to 0.02 s (was 0.05), so it and the tuner agree on
+  what "fast" means.
+
+### Fixed
+- **Auto tune measured itself.** Capture kept posting frames during the probe, so the
+  first round could collide with the app's own traffic and the run failed with "even the
+  slowest probe was rejected" against a healthy radio. The capture loop now stays off the
+  radio while the tuner owns it, and `/health` reports `tuning`.
+
 ## [2.3.0] — 2026-11-11
 
 ### Added

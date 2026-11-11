@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.4.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.5.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -178,8 +178,9 @@ only value that never comes back over the wire. It is stored in `secrets.json`
 saved token, or press **Clear** to remove it.
 
 The UI itself has no authentication, so it listens on **`127.0.0.1:8000` by default** —
-this machine only. `BIND_HOST` and `BIND_PORT` (Server card) change that and need a
-restart; set `BIND_HOST=0.0.0.0` to reach the UI from another device, and only on a
+this machine only. `BIND_HOST` and `BIND_PORT` (Server card) change that, and saving either
+restarts the app so the change actually takes effect — the page follows it to the new port.
+Set `BIND_HOST=0.0.0.0` to reach the UI from another device, and only on a
 network you trust, since anyone who can reach that port can change settings, read the
 light mapping, and trigger a calibration flash. The bundled systemd unit sets
 `BIND_HOST=0.0.0.0` explicitly — comment that line out to keep it local. Put it behind

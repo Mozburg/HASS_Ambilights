@@ -8,6 +8,26 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.5.0] — 2026-11-11
+
+### Added
+- **Settings that need a restart now restart the app.** Saving `MONITOR_INDEX`,
+  `BIND_HOST` or `BIND_PORT` used to leave a "restart required" tag and nothing else, so
+  the setting quietly did nothing until you closed and reopened the exe. The process now
+  re-execs itself with the same arguments once the save is confirmed, and the settings
+  page follows it — to the new port, if the port is what changed.
+- The restart refuses to fire twice within 30 seconds. A wrong `BIND_HOST` that stops the
+  app starting would otherwise turn into a restart loop you have to kill from Task
+  Manager; the guard file records the attempt and the log says what to fix.
+
+### Fixed
+- **Auto tune's chosen pacing rendered as invalid in its own field.** It writes three
+  decimals (`0.057`) while the Fastest pacing input stepped in `0.01`, so the number it
+  had just chosen failed the browser's own step validation. Floor now steps by `0.001`,
+  the ceiling by `0.01`, and capture/idle rates by `0.1`.
+- The Auto tune result names the running version, so a stale build is obvious where the
+  number appears rather than only in the footer.
+
 ## [2.4.0] — 2026-11-11
 
 ### Changed

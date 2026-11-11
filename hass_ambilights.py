@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1157,7 +1157,17 @@ async function save() {
       return;
     }
     let msg = data.persisted === false ? "Applied (not saved)" : "Saved & applied";
-    if (data.restart_required.length) msg += " — restart to apply " + data.restart_required.join(", ");
+    if (data.restart_required.length) {
+      if (data.restarting === false) {
+        msg += " — restart to apply " + data.restart_required.join(", ");
+      } else {
+        const port = (data.settings || {}).BIND_PORT;
+        const moved = ["BIND_HOST", "BIND_PORT"].some((n) => data.restart_required.includes(n));
+        msg += " — restarting to apply " + data.restart_required.join(", ")
+             + (moved && port ? ` (moving to port ${port})` : "");
+        watchRestart(moved ? port : null);
+      }
+    }
     if (data.connection && data.connection.detail !== "unchanged") {
       msg += " · HA: " + data.connection.detail;
       if (!data.connection.ok) { toast(msg, true); await reload(); return; }
@@ -1196,6 +1206,27 @@ async function resetDefaults() {
   } catch (e) {
     toast("Reset failed: " + e.message, true);
   }
+}
+
+async function watchRestart(port) {
+  const moved = port && String(port) !== location.port;
+  const target = moved ? `${location.protocol}//${location.hostname}:${port}/` : null;
+  const started = Date.now();
+  while (Date.now() - started < 40000) {
+    await new Promise((res) => setTimeout(res, 700));
+    try {
+      if (target) {
+        // a different port is a different origin: no-cors resolves when it answers
+        await fetch(target, { mode: "no-cors", cache: "no-store" });
+        location.href = target;
+        return;
+      }
+      const r = await fetch("/health", { cache: "no-store" });
+      if (r.ok) { location.reload(); return; }
+    } catch (e) { /* still down */ }
+  }
+  toast(target ? `Look for it on ${target} — or start HASS Ambilights again`
+                : "It did not come back on its own — start HASS Ambilights again", true);
 }
 
 async function calibrate() {
@@ -1446,7 +1477,8 @@ async function autotuneNow() {
         const message = `✔ ${report.floor.toFixed(2)}–${report.ceiling.toFixed(2)} s`
           + (lights ? ` · ${lights} light${lights === 1 ? "" : "s"}` : "")
           + (report.fps ? ` · ${report.fps} fps` : "")
-          + (report.busy_at_ms ? ` (rejected at ${report.busy_at_ms} ms)` : " (no rejections)");
+          + (report.busy_at_ms ? ` (rejected at ${report.busy_at_ms} ms)` : " (no rejections)")
+          + ((LASTCONFIG && LASTCONFIG.version) ? ` · v${LASTCONFIG.version}` : "");
         await reload();                 // applied live; the badge asks you to save
         const fresh = $("autotunestatus");   // reload rebuilds the card
         if (fresh) { fresh.textContent = message; fresh.style.color = "var(--ok)"; }
@@ -1559,13 +1591,14 @@ SETTINGS = [
           "How many columns the screen is split into (3x3 by default, up to 8x8).",
           min=1, max=8),
     _spec("CAPTURE_FPS", "float", 12.0, "Capture", "Capture rate",
-          "Screen samples per second. Sends are paced separately.",
-          min=1.0, max=60.0, step=1.0),
+          "Screen samples per second. Sends are paced separately. Auto tune sets this "
+          "from the pacing it measured.",
+          min=1.0, max=60.0, step=0.1),
     _spec("CAPTURE_STRIDE", "int", 4, "Capture", "Pixel stride",
           "Use every Nth pixel: 1 = lossless and expensive, 4 = 1/16 of the pixels.",
           min=1, max=16, restart=False, advanced=True),
     _spec("IDLE_FPS", "float", 4.0, "Capture", "Idle rate",
-          "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.5, advanced=True),
+          "Sampling rate while the screen is unchanged.", min=0.5, max=30.0, step=0.1, advanced=True),
     _spec("IDLE_AFTER", "int", 3, "Capture", "Idle after",
           "Identical frames before dropping to the idle rate.", min=0, max=60, advanced=True),
     _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor",
@@ -1578,10 +1611,10 @@ SETTINGS = [
           "pins it; 0 snaps.", advanced=True),
     _spec("POST_INTERVAL_FLOOR", "float", 0.15, "Sending", "Fastest pacing",
           "Minimum time between commands. Raise it if the Zigbee controller keeps resetting.",
-          min=0.02, max=1.0, step=0.01),
+          min=0.02, max=1.0, step=0.001),
     _spec("POST_INTERVAL_CEILING", "float", 0.6, "Sending", "Backoff ceiling",
           "Pacing is allowed to grow to this when the radio reports BUSY.",
-          min=0.1, max=3.0, step=0.05),
+          min=0.1, max=3.0, step=0.01),
     _spec("SEND_CONCURRENCY", "bool", True, "Sending", "Concurrent sends",
           "Issue each cycle's lights at once instead of waiting for each device ack.", advanced=True),
     _spec("MIN_DELTA_E", "float", 1.0, "Sending", "Colour deadband",
@@ -3312,6 +3345,7 @@ def health():
         "dry_run": DRY_RUN,
         # raw_grid is a numpy array (serialised lazily); bool(array) raises
         "tuning": TUNING.is_set(),
+        "restarting": stats.get("restarting", False),
         "has_frame": bool(len(latest_data["raw_grid"])) if latest_data["raw_grid"] is not None else False,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "stats": dict(stats),
@@ -3515,10 +3549,79 @@ def post_config(payload: Any = Body(...)):
         if SETTINGS_BY_NAME.get(name, {}).get("type") == "secret" else value
         for name, value in applied.items()
     }
+    restart_required = sorted(n for n in changed
+                              if SETTINGS_BY_NAME.get(n, {}).get("restart"))
+    restarted = False
+    if restart_required and persist:
+        # the setting is saved; say so before the process replaces itself
+        restarted = restart_self(", ".join(restart_required))
     return {"ok": True, "applied": safe_applied, "settings": settings_snapshot(),
             "persisted": persist, "connection": probe, "autostart": dict(AUTOSTART_RESULT),
-            "restart_required": sorted(n for n in changed
-                                        if SETTINGS_BY_NAME.get(n, {}).get("restart"))}
+            "restart_required": restart_required, "restarting": restarted}
+
+
+AUTO_RESTART = (_env("AUTO_RESTART", "1") != "0"
+                and not os.environ.get("HASS_AMBILIGHTS_NO_RESTART"))
+RESTART_MARKER = ("restart_guard", )
+stats["restarting"] = False
+
+
+def restart_argv() -> list[str]:
+    """The command that starts this program again, as it was started."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable] + sys.argv[1:]
+    return [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+
+
+def _restart_guard_path() -> Path:
+    base = CONFIG_PATH.parent if "CONFIG_PATH" in globals() else Path.cwd()
+    return base / ".restart_guard"
+
+
+def restart_self(reason: str = "", delay: float = 0.8) -> bool:
+    """Re-exec with the same arguments - the only honest way to apply BIND_*.
+
+    Refuses to fire twice in a row without a quiet start in between: a setting that
+    stops the program from starting at all must not turn into a restart loop the
+    user has to kill from Task Manager.
+    """
+    guard = _restart_guard_path()
+    now = time.time()
+    try:
+        last = float(guard.read_text().strip() or 0)
+    except (OSError, ValueError):
+        last = 0.0
+    if AUTO_RESTART and now - last < 30:
+        log.warning("refusing to restart twice within 30 s - fix the last change by hand "
+                    "(the guard file %s records it)", guard)
+        return False
+    if not AUTO_RESTART:
+        log.info("auto restart is off; restart to apply %s", reason)
+        return False
+    try:
+        guard.parent.mkdir(parents=True, exist_ok=True)
+        guard.write_text(f"{now}")
+    except OSError:
+        pass
+
+    argv = restart_argv()
+    stats["restarting"] = True
+
+    def go() -> None:
+        log.info("restarting to apply %s: %s", reason or "settings", " ".join(argv))
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        try:
+            os.execv(argv[0], argv)
+        except Exception as exc:
+            log.error("could not restart (%s) - start the app again to apply %s", exc, reason)
+            stats["restarting"] = False
+
+    threading.Timer(delay, go).start()
+    return True
 
 
 @app.post("/api/autotune")
@@ -3864,6 +3967,19 @@ def _run() -> None:
     setup_file_logging()
     make_dpi_aware()                     # before any window or capture exists
     log.info("HASS Ambilights %s starting (mode=%s, frozen=%s)", __version__, mode, FROZEN)
+    # The guard records the last auto restart. A process that lives past the window
+    # proves it is not looping, so only then is the guard cleared - deleting it at
+    # startup would make a crash loop look like a fresh launch every time.
+    def _expire_restart_guard() -> None:
+        try:
+            guard = _restart_guard_path()
+            if guard.exists() and time.time() - float(guard.read_text().strip() or 0) > 30:
+                guard.unlink()
+        except (OSError, ValueError):
+            pass
+
+    _expire_restart_guard()
+    threading.Timer(31, _expire_restart_guard).start()
     splash_text("loading settings")
 
     load_secrets()

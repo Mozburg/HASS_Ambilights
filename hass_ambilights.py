@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -766,13 +766,33 @@ function renderLights() {
       const blank = document.createElement("option");
       blank.value = ""; blank.textContent = "— pick a light —";
       name.appendChild(blank);
-      options.forEach((l) => {
+      const addOption = (parent, l) => {
         const o = document.createElement("option");
         o.value = l.entity_id;
         o.textContent = `${l.name} — ${l.entity_id}` + (l.color_capable ? "" : " (no colour)");
         if (l.entity_id === light.entity) o.selected = true;
-        name.appendChild(o);
+        parent.appendChild(o);
+      };
+      // one group per area, in the order Home Assistant's registry implies (sorted),
+      // then everything with no area, which is usually the leftovers
+      const groups = new Map();
+      options.forEach((l) => {
+        const key = l.area || "";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(l);
       });
+      [...groups.keys()].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b))
+        .forEach((area) => {
+          const members = groups.get(area);
+          if (!area) {                       // unassigned: no heading, just the leftovers
+            members.forEach((l) => addOption(name, l));
+            return;
+          }
+          const group = document.createElement("optgroup");
+          group.label = `${area} (${members.length})`;
+          members.forEach((l) => addOption(group, l));
+          name.appendChild(group);
+        });
       if (!light.entity) name.value = "";
       name.onchange = () => { LIGHTS[i].entity = name.value; setDirty(true, true); markUsedZones(); };
     } else {
@@ -1076,7 +1096,10 @@ async function loadEntities(force) {
   }
   if (note) {
     if (ENTITIES.ok) {
-      note.textContent = `${ENTITIES.count} light(s) from Home Assistant — pick one per row.`;
+      const areas = (ENTITIES.areas || []).length;
+      note.textContent = `${ENTITIES.count} light(s) from Home Assistant`
+        + (areas ? ` in ${areas} area${areas === 1 ? "" : "s"}` : "")
+        + " — pick one per row.";
     } else {
       note.textContent = `Typing entity ids by hand: ${ENTITIES.detail}.`;
     }
@@ -3386,6 +3409,33 @@ def get_monitors():
     return {"ok": True, "count": len(out) - 1, "choices": len(out), "monitors": out}
 
 
+# The REST API has no area registry; the template API can name one per entity and
+# resolves device areas too, so one render is enough for the whole list.
+AREA_TEMPLATE = ("{% for s in states.light %}{{ s.entity_id }}={{ area_name(s.entity_id) or '' }}\n"
+                 "{% endfor %}")
+
+
+def fetch_areas() -> dict[str, str]:
+    """entity_id -> area name. Empty dict when the template API is unavailable."""
+    try:
+        response = session.post(f"{HA_URL}/api/template", headers=auth_headers(),
+                                json={"template": AREA_TEMPLATE},
+                                timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        log.debug("could not read areas from Home Assistant: %s", exc)
+        return {}
+    if response.status_code != 200:
+        log.debug("area lookup returned HTTP %s", response.status_code)
+        return {}
+    areas: dict[str, str] = {}
+    for line in response.text.splitlines():
+        entity, _, area = line.strip().partition("=")
+        area = area.strip()
+        if entity.startswith("light.") and area:
+            areas[entity] = area
+    return areas
+
+
 @app.get("/api/lights")
 def get_lights(refresh: bool = False):
     """Light entities from Home Assistant, for the picker."""
@@ -3410,6 +3460,7 @@ def get_lights(refresh: bool = False):
     except ValueError:
         return {"ok": False, "lights": [], "detail": "Home Assistant returned non-JSON"}
 
+    areas = fetch_areas()
     found = []
     for state in states if isinstance(states, list) else []:
         entity = str(state.get("entity_id") or "")
@@ -3424,9 +3475,14 @@ def get_lights(refresh: bool = False):
             "color_modes": modes,
             # only these modes can express an arbitrary hue
             "color_capable": any(m in ("xy", "rgb", "rgbw", "rgbww", "hs", "rgbxy") for m in modes),
+            "area": areas.get(entity, ""),
         })
-    found.sort(key=lambda l: (not l["color_capable"], l["name"].lower()))
-    payload = {"ok": True, "count": len(found), "lights": found}
+    # grouped by area in the UI, so sort that way: named areas first, unassigned last
+    found.sort(key=lambda l: (l["area"] == "", l["area"].lower(), not l["color_capable"],
+                              l["name"].lower()))
+    payload = {"ok": True, "count": len(found), "lights": found,
+               "areas": sorted({l["area"] for l in found if l["area"]}, key=str.lower),
+               "unassigned": sum(1 for l in found if not l["area"])}
     LIGHTS_CACHE.update({"at": now, "data": payload})
     return payload
 

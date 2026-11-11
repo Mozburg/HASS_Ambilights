@@ -1,14 +1,16 @@
 # HASS Ambilights
 
-**Version 2.5.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.6.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
 
 ![settings UI](docs/ui.png)
 
-- **3×3 zone mapping** — give each light any subset of nine screen regions (`1,4,7`
-  = left column, `5` = centre only, `all` = the whole screen).
+- **Any grid of zones** — 3×3 by default, up to 8×8: give each light any subset of the
+  screen regions (`1,4,7` = left column, `5` = centre only, `all` = the whole screen).
+- **Picks your lights for you** — the entity list comes from Home Assistant and is grouped
+  by area, so a room's lights sit together.
 - **Colour that matches** — chromaticity is computed in linear light and sent as
   `xy_color`, so the lamp reproduces it to within du'v' 0.0001 of what you measured.
 - **Average or dominant** — mirror the whole region, the most prominent *coloured*

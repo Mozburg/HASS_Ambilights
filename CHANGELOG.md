@@ -8,6 +8,34 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.0] — 2026-11-11
+
+The colour path, second pass. The first fix below is a correction: 2.7.1 claimed to fix
+"mean colour + dominant brightness" and did not — the value was computed and then dropped
+by the consumer.
+
+### Fixed
+- **The brightness blend reaches the sender.** `dominant_luminance` was applied inside
+  `if "dominant" in colour:`, which is exactly the branch that does not exist when the
+  colour is mean and only the brightness blend wants the cluster. Measured before/after on
+  a half-dark frame: brightness 126 → 191.
+- **The 3×3 panel previews what the lights get.** The grid was drawn from the un-blended
+  aggregate while the light for that zone received the blended dominant — measured ΔE 36
+  between the two chips at the default blend. One `_apply_dominant()` now feeds both.
+- **Saturated colours are previewed, not washed out.** The chip solved the chromaticity
+  *at* `brightness/255`, which clips any channel that needs more than 1.0 in linear light:
+  orange previewed as `#ffc03a`, red as `#ff4f4f`. It is now rendered at full chrome and
+  scaled afterwards — `#e87f23` and `#e82525` — and the rgb payload uses the same path, so
+  `rgb_color` no longer sends pink where `xy_color` sends red.
+- **A black frame asks for black.** With brightness off the rgb payload fell back to
+  `[255, 255, 255]`, i.e. a black screen commanded full white.
+
+### Changed
+- **The colour stage is ~4× cheaper.** One `aggregate()` per frame instead of 2 + N (a
+  full-grid light reused the same value it had just computed), and the 3×3 panel is only
+  built while something is actually polling `/regions` — it exists for the settings page,
+  so nine aggregates per frame were pure waste. Measured 6.25 ms → ~1.6 ms per frame.
+
 ## [2.8.0] — 2026-11-11
 
 Five read-only auditors went over disjoint slices of this file; every finding was

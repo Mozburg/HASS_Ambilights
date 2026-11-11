@@ -424,6 +424,54 @@ _plain = m.aggregate(m._srgb_to_linear(
 assert "dominant_luminance" not in _plain, "follow-on at blend 0 is plain mean brightness"
 print("blend ok: mean colour + dominant brightness works, and only when asked")
 
+# --- the brightness blend must survive the consumer, not just aggregate -----
+_page = np.zeros((36, 64, 3), dtype=np.uint8)
+_page[:] = (30, 30, 34)
+_page[8:28, 16:48] = (255, 140, 40)
+_lin = m._srgb_to_linear(_page.astype(np.float32) / 255.0)
+m.COLOUR_BLEND = 0.0
+m.BRIGHTNESS_FOLLOW_COLOUR = False
+m.BRIGHTNESS_BLEND = 1.0
+_colour = m.aggregate(_lin)
+_before_level = _colour["luminance"]
+# exactly the two lines the capture loop runs
+if "dominant" in _colour:
+    _colour["xy"] = _colour["dominant"]
+_colour["luminance"] = _colour.pop("dominant_luminance", _colour["luminance"])
+assert _colour["luminance"] > _before_level * 1.5, (_before_level, _colour["luminance"])
+assert m.brightness_for_colour(_colour) > m.brightness_for_luminance(_before_level), "consumer"
+print("brightness blend ok: the cluster level reaches the sender, not just aggregate()")
+
+# a saturated chip must look like the colour, not a pale version of it
+import math as _math
+for _rgb in ((255, 140, 40), (200, 30, 30), (40, 80, 255)):
+    _xy = m.xy_from_rgb(list(_rgb))
+    _c = {"rgb": list(_rgb), "xy": [round(_xy[0], 4), round(_xy[1], 4)], "luminance": 0.5}
+    _chip = m.preview_colour(_c)
+    _hue = m.xy_from_rgb(_chip["rgb"])
+    _err = m._neo(_hue, _xy)
+    assert _err < 0.05, (_rgb, _chip["hex"], _err)
+
+# and the rgb payload must agree with the xy one about the hue
+m.SEND_MODE = "rgb"
+m.SEND_BRIGHTNESS = False
+_payload = m.build_payload(_c)
+_red = m.xy_from_rgb(_payload["rgb_color"])
+assert m._neo(_red, _xy) < 0.05, (_payload["rgb_color"], _xy)
+m.SEND_MODE = "xy"
+m.SEND_BRIGHTNESS = True
+print("preview ok: chips and rgb payload keep the requested hue (du'v' < 0.05)")
+
+# a black frame must not command white
+m.SEND_MODE = "rgb"
+m.SEND_BRIGHTNESS = False
+_black = m.aggregate(np.zeros((4, 4, 3), dtype=np.float32))
+_black_payload = m.build_payload(_black)
+assert max(_black_payload["rgb_color"]) <= 1, _black_payload
+m.SEND_MODE = "xy"
+m.SEND_BRIGHTNESS = True
+print("black ok: a black frame asks for black, not white")
+
 # --- black cells (letterbox bars, black windows) must not break dominant --
 bars = np.zeros((12, 22, 3), dtype=np.uint8)          # 264 cells, 132 black
 bars[3:9, :] = (255, 120, 30)

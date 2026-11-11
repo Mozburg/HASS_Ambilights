@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -2063,6 +2063,7 @@ def load_config_file(path: Path | None = None) -> None:
 
 # ------------------------------------------------------------- shared state -
 latest_data = {"raw_grid": [], "regions": {}, "lights": {}}
+REGIONS_WANTED_UNTIL = 0.0
 stop_event = threading.Event()
 state_lock = threading.Lock()
 
@@ -2402,6 +2403,28 @@ def current_transition() -> float:
     return max(MIN_TRANSITION, min(MAX_TRANSITION, interval / 1000.0 * 1.15))
 
 
+def _apply_dominant(colour: dict) -> dict:
+    """Swap in the blended/dominant colour and level, the way the sender does."""
+    if "dominant" in colour:
+        colour["xy"] = colour["dominant"]
+        colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
+    colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
+    return colour
+
+
+def render_rgb(xy, level: float) -> list[int]:
+    """The chromaticity at full chrome, scaled to ``level`` in linear light.
+
+    Solving the chromaticity *at* the level clips any saturated colour: an orange
+    needs red = 1.86 at level 1, so the red clamps and the chip goes pale. Render
+    the hue unscaled and scale afterwards and the chip matches the bulb.
+    """
+    lin = np.array(_linear_rgb_from_xy(xy, 1.0), dtype=np.float32)
+    peak = float(max(lin.max(), 1e-6))
+    lin = np.clip(lin / peak * max(level, 1e-4), 0.0, 1.0)
+    return srgb_from_linear(lin)
+
+
 def preview_colour(colour: dict) -> dict:
     """What the bulb will actually show: the same transform the payload uses.
 
@@ -2414,7 +2437,7 @@ def preview_colour(colour: dict) -> dict:
     if not valid_xy(xy):
         xy, k = (base if valid_xy(base) else D65_XY), 1.0
     brightness = brightness_for_colour(colour) if SEND_BRIGHTNESS else 255
-    rgb = srgb_from_xy(xy, max(brightness / 255.0, 1e-4))
+    rgb = render_rgb(xy, brightness / 255.0)
     return {
         "xy": [round(xy[0], 4), round(xy[1], 4)],
         "brightness": brightness,
@@ -2431,10 +2454,15 @@ def build_payload(colour: dict) -> dict:
     xy = tuple(preview["xy"])
     stats["saturation_k"] = preview["saturation_k"]
     if SEND_MODE == "rgb":
-        rgb = srgb_from_xy(xy, max(colour["luminance"], 1e-4))
-        peak = max(max(rgb), 1)          # HA reads chromaticity from rgb_color
-        scaled = [int(round(c * 255.0 / peak)) for c in rgb]
-        payload["rgb_color"] = scaled if max(scaled) > 0 else [255, 255, 255]
+        # peak-normalised so HA reads the right chromaticity; the level is carried
+        # by brightness. Deriving it from the mean luminance while the colour came
+        # from the cluster is what made rgb mode send pink instead of red.
+        if float(colour.get("luminance") or 0.0) <= 1e-6:
+            payload["rgb_color"] = [1, 1, 1]      # a black frame, not a white one
+        else:
+            rgb = render_rgb(xy, 1.0)
+            peak = max(max(rgb), 1)
+            payload["rgb_color"] = [int(round(c * 255.0 / peak)) for c in rgb]
     else:
         payload["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
     if SEND_BRIGHTNESS:
@@ -3270,13 +3298,22 @@ def capture_loop() -> None:
 
             lin = _srgb_to_linear(grid.astype(np.float32) / 255.0)
             measured_at = time.perf_counter()
-            zone_cells = zones_cells(lin)
+            full = aggregate(lin)          # once per frame, reused by every full-grid light
+            # The 3x3 panel exists for the UI only: nobody polling /regions means
+            # nine aggregates per frame are pure waste (4 ms of a 6 ms colour stage).
+            need_zones = any(len(t.zones) != ZONE_COUNT for t in TARGETS)
+            want_panel = time.time() < REGIONS_WANTED_UNTIL
+            zone_cells = zones_cells(lin) if (need_zones or want_panel) else None
 
-            zone_colours = [aggregate(c) for c in zone_cells]
+            zone_colours = [aggregate(c) for c in zone_cells] if zone_cells else []
+            for zone_colour in zone_colours:      # the grid must preview what is sent
+                _apply_dominant(zone_colour)
+            shown = dict(full)
+            _apply_dominant(shown)
             regions = {
                 "zones": [dict(c, preview=preview_colour(c)) for c in zone_colours],
-                "full": dict(aggregate(lin), preview=preview_colour(aggregate(lin))),
-            }
+                "full": dict(shown, preview=preview_colour(shown)),
+            } if zone_colours else latest_data.get("regions") or {}
             # While the tuner owns the radio nothing here is sent, so nothing here
             # may be stamped either: a stamped-but-dropped frame suppresses the
             # same colour for RESEND_AFTER once the tune ends.
@@ -3284,11 +3321,16 @@ def capture_loop() -> None:
             batch: dict[str, dict] = {}
             light_report: dict[str, dict] = {}
             for target in TARGETS:
-                colour = aggregate(cells_for(target, lin, zone_cells))
+                if len(target.zones) == ZONE_COUNT:
+                    colour = dict(full)     # identical by construction, already computed
+                else:
+                    colour = aggregate(cells_for(target, lin, zone_cells))
                 if "dominant" in colour:
                     colour["xy"] = colour["dominant"]
                     colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
-                    colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
+                # outside the branch: with the colour at mean and the brightness
+                # blend at 1 there is no "dominant" key, and the level was dropped
+                colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
                 colour["measured_at"] = measured_at
                 colour["preview"] = preview_colour(colour)
                 light_report[target.entity_id] = colour
@@ -3466,6 +3508,8 @@ def get_raw_grid():
 
 @app.get("/regions")
 def get_regions():
+    global REGIONS_WANTED_UNTIL
+    REGIONS_WANTED_UNTIL = time.time() + 5.0      # build the panel for 5 s after a look
     with state_lock:
         return {"zones": latest_data["regions"].get("zones", []),
                 "full": latest_data["regions"].get("full")}

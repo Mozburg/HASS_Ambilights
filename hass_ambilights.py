@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -2265,26 +2265,31 @@ def aggregate(cells_lin: np.ndarray) -> dict:
         "luminance": round(float(_linear_to_xyz(mean_lin)[1]), 4),
     }
     colour_blend = min(1.0, max(0.0, COLOUR_BLEND))
-    if colour_blend > 0:
+    # Brightness can want the cluster even when the colour does not (mean colour,
+    # dominant brightness), so the cluster is computed when EITHER asks for it -
+    # tying it to the colour slider made that combination silently do nothing.
+    luma_blend = (colour_blend if BRIGHTNESS_FOLLOW_COLOUR
+                  else min(1.0, max(0.0, BRIGHTNESS_BLEND)))
+    if colour_blend > 0 or luma_blend > 0:
         (dx, dy), cluster_lin = dominant_colour(cells_lin.reshape(-1, 3), (x, y))
-        if colour_blend < 1.0:
-            mu, mv = _xy_to_uv((x, y))
-            du, dv = _xy_to_uv((dx, dy))
-            dx, dy = _uv_to_xy((mu + colour_blend * (du - mu), mv + colour_blend * (dv - mv)))
-        out["dominant"] = [round(dx, 4), round(dy, 4)]
         # The brightness/dedupe decision has to look at the colour we actually
         # send, not the region mean, or the two disagree (a vivid block on a dark
         # page kept the lamp dim, and hue changes could pass the dE test).
         level = out["luminance"]
-        if cluster_lin is not None:
-            luma_blend = (colour_blend if BRIGHTNESS_FOLLOW_COLOUR
-                          else min(1.0, max(0.0, BRIGHTNESS_BLEND)))
+        if cluster_lin is not None and luma_blend > 0:
             cluster_y = float(_linear_to_xyz(cluster_lin)[1])
             if luma_blend < 1.0:
                 cluster_y = level + luma_blend * (cluster_y - level)
             out["dominant_luminance"] = round(cluster_y, 4)
             level = cluster_y
-        out["rgb_dominant"] = srgb_from_xy((dx, dy), max(level, 1e-4))
+        if colour_blend > 0:
+            if colour_blend < 1.0:
+                mu, mv = _xy_to_uv((x, y))
+                du, dv = _xy_to_uv((dx, dy))
+                dx, dy = _uv_to_xy((mu + colour_blend * (du - mu),
+                                    mv + colour_blend * (dv - mv)))
+            out["dominant"] = [round(dx, 4), round(dy, 4)]
+            out["rgb_dominant"] = srgb_from_xy((dx, dy), max(level, 1e-4))
     return out
 
 

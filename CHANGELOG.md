@@ -8,6 +8,16 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.7.1] — 2026-11-11
+
+### Fixed
+- **Mean colour with dominant brightness did nothing.** The dominant cluster was computed
+  only when the *colour* blend was above 0, so turning on *Brightness follows colour* off
+  and dragging the brightness slider to 1 (keeping the colour at mean) silently stayed at
+  the zone mean — the combination the new controls invite. The cluster is now computed when
+  either slider asks for it, found by an audit subagent's measurement rather than by the
+  suite, which had no test for it.
+
 ## [2.7.0] — 2026-11-11
 
 ### Changed

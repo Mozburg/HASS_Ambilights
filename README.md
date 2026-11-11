@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.6.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.7.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -155,9 +155,9 @@ guess which index is the screen they're looking at.
 
 | setting | what it does |
 |---|---|
-| `COLOR_ALGO` | `mean` = linear average of the zones; `dominant` = the most prominent *coloured* cluster, neutral cells ignored (default) |
-| `DOMINANT_MIX` | 0–1 slider between those two models, blended in u'v' (default 0.5) |
-| `DOMINANT_LUMINANCE` | brightness follows the winning cluster (`cluster`, default) or the whole region (`region`) |
+| `COLOUR_BLEND` | one slider: **0 = mean**, **1 = dominant**, anything between is a blend of the two (default 0.5). Blended in u'v', which is why the midpoint stays a real colour rather than a muddy average |
+| `BRIGHTNESS_FOLLOW_COLOUR` | on (default): brightness blends exactly the way the colour does. Off: use `BRIGHTNESS_BLEND` |
+| `BRIGHTNESS_BLEND` | 0 = the zone's average luminance, 1 = the dominant cluster's own brightness |
 | `CHROMA_FLOOR` | how colourful a cell must be to vote at all — this is what makes white pages and grey UI stop washing the colour out (default du'v' 0.010) |
 | `HUE_BINS` | dominant mode's hue resolution: 24 = 15° buckets, and the winner is averaged with its two neighbours. Lower merges two similar hues into one steady colour; higher separates them but can flicker between neighbours (default 24) |
 | `SATURATION_BOOST` | off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
@@ -166,10 +166,14 @@ guess which index is the screen they're looking at.
 | `SEND_MODE` | `xy` (default, precise) or legacy `rgb` |
 | `ZONE_ROWS`, `ZONE_COLS` | how many zones the screen is split into (default 3 × 3). Up to 8 × 8, so a wide desk can be 5 × 3 and a wall of spotlights 4 × 4. Zones are numbered in reading order; shrinking the grid is refused while a light's mapping still uses a zone that no longer exists |
 
-Rule of thumb: a white page holding one vivid photo is a pale wash under `mean` and
-the photo's colour under `dominant`. `DOMINANT_MIX` decides how far you travel, and
-`DOMINANT_LUMINANCE` decides whether the room follows that object's brightness or
-keeps the zone's overall level.
+Rule of thumb: a white page holding one vivid photo is a pale wash at `COLOUR_BLEND` 0
+and the photo's colour at 1; 0.5 keeps some of the page in the mix. Leave
+`BRIGHTNESS_FOLLOW_COLOUR` on unless you want a bright object on a dark page to light the
+room without also pulling the colour toward mean — that is what turning it off is for.
+
+`COLOR_ALGO`, `DOMINANT_MIX` and `DOMINANT_LUMINANCE` still work if you have them in an
+old config or a script: they are folded into the sliders on load (`mean` → 0, `dominant`
+→ 1) and hidden from the page.
 
 ## Credentials and exposure
 

@@ -42,12 +42,12 @@ VERSION_RESOURCE = """VSVersionInfo(
   ),
   kids=[
     StringFileInfo([StringTable('040904B0', [
-        StringStruct('CompanyName', 'Hass Ambilights'),
-        StringStruct('FileDescription', 'Mirror the screen onto Home Assistant lights'),
+        StringStruct('CompanyName', 'HASS Ambilights'),
+        StringStruct('FileDescription', 'HASS Ambilights'),
         StringStruct('FileVersion', '{version}'),
         StringStruct('InternalName', 'HassAmbilights'),
         StringStruct('OriginalFilename', 'HassAmbilights.exe'),
-        StringStruct('ProductName', 'Hass Ambilights'),
+        StringStruct('ProductName', 'HASS Ambilights'),
         StringStruct('ProductVersion', '{version}'),
         StringStruct('LegalCopyright', 'MIT Licence')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

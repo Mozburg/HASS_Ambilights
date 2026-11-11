@@ -24,20 +24,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-gui.txt pyinstaller
 
-      - name: Generate icon and version resource
-        run: python packaging/make_assets.py
+      - name: Generate icon, splash and version resource
+        run: |
+          python packaging/make_assets.py
+          python packaging/make_splash.py
 
       - name: Build one-file exe
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
             --name HassAmbilights `
             --icon packaging/icon.ico `
+            --splash packaging/splash.png `
             --version-file packaging/version_info.txt `
             --collect-submodules uvicorn `
             --collect-submodules pystray `
             --collect-submodules webview `
             --hidden-import pystray._win32 `
-            --exclude-module tkinter `
             --exclude-module matplotlib `
             hass_ambilights.py
 
@@ -74,7 +76,7 @@ jobs:
           }
           Write-Host "health ok, version $version"
           $page = Invoke-WebRequest -Uri "http://127.0.0.1:8123/" -UseBasicParsing -TimeoutSec 5
-          if ($page.Content -notmatch "Hass Ambilights") { throw "settings page did not render" }
+          if ($page.Content -notmatch "HASS Ambilights") { throw "settings page did not render" }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if ($version -ne "$((Get-Content hass_ambilights.py | Select-String '__version__ = "([0-9.]+)"').Matches.Groups[1].Value)") {
             throw "exe reports $version, source says something else"

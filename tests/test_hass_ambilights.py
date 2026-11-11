@@ -661,8 +661,13 @@ applied, errors = m.apply_settings({"HA_URL": "http://ha.example:8123/", "HA_TOK
 assert not errors, errors
 assert m.HA_URL == "http://ha.example:8123", m.HA_URL          # trailing slash dropped
 assert m.HA_TOKEN == "tok-123"
-assert m.SECRETS_PATH.exists() and m.SECRETS_PATH.stat().st_mode & 0o777 == 0o600, oct(
-    m.SECRETS_PATH.stat().st_mode)
+assert m.SECRETS_PATH.exists()
+if os.name == "nt":
+    # Windows has no POSIX mode bits (it reports 0o666); protection there is the
+    # file's ACL, so only the existence and the write itself are checkable here
+    print("secrets perms: skipped on Windows (ACL, not mode bits)")
+else:
+    assert m.SECRETS_PATH.stat().st_mode & 0o777 == 0o600, oct(m.SECRETS_PATH.stat().st_mode)
 assert "tok-123" not in _json.dumps(m.settings_snapshot())
 assert m.settings_snapshot()["HA_TOKEN"] == "<set>"
 assert m.auth_headers() == {"Authorization": "Bearer tok-123"}

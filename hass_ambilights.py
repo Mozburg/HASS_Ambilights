@@ -59,7 +59,7 @@ from typing import Any
 import os
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -84,7 +84,7 @@ def _requirements() -> tuple:
     """requirements.txt next to the script, else the embedded list."""
     req = Path(__file__).resolve().with_name("requirements.txt")
     try:
-        lines = [line.split("#")[0].strip() for line in req.read_text().splitlines()]
+        lines = [line.split("#")[0].strip() for line in req.read_text(encoding="utf-8").splitlines()]
     except OSError:
         lines = []
     lines = [line for line in lines if line]
@@ -116,7 +116,7 @@ def _bootstrap_venv():
 
     marker = venv_dir / ".deps-ok"
     wanted = " ".join(packages)
-    if python.exists() and marker.exists() and marker.read_text().strip() == wanted \
+    if python.exists() and marker.exists() and marker.read_text(encoding="utf-8").strip() == wanted \
             and _deps_import(python):
         return python                     # provisioned and actually importable
     if venv_dir.exists():
@@ -147,7 +147,7 @@ def _bootstrap_venv():
             "Check your network and requirements.txt, then run this again.\n"
             "To install by hand:\n    %s -m pip install %s"
             % (python, " ".join(packages)))
-    marker.write_text(wanted + "\n")
+    marker.write_text(wanted + "\n", encoding="utf-8")
     return python
 
 
@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.0"
+__version__ = "2.9.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -758,8 +758,12 @@ const serializeMap = (list) => list
   .filter((l) => l.entity.trim())
   .map((l) => {
     const z = [...l.zones].sort((a, b) => a - b);
-    return l.entity.trim() + "=" + (z.length === ZONE_COUNT ? "all" : (z.join(",") || "all"));
-  }).join("; ");
+    // clearing every zone used to fall through to "all", i.e. the exact opposite
+    if (!z.length) return "";
+    return l.entity.trim() + "=" + (z.length === ZONE_COUNT ? "all" : z.join(","));
+  })
+  .filter(Boolean)
+  .join("; ");
 
 function renderLights() {
   const box = $("lights");
@@ -1185,7 +1189,7 @@ async function reload() {
   $("hapill").textContent = data.ha_url;
   renderSettings();
   renderLights();
-  setDirty(!!data.unsaved);        // live values that the file doesn't have yet
+  setDirty(!!data.unsaved, false); // live values that the file doesn't have yet
 }
 
 function applyLive() {
@@ -1194,7 +1198,10 @@ function applyLive() {
     const seq = ++liveSeq;
     CFG.LIGHT_MAP = serializeMap(LIGHTS);      // lights/zones are live too
     const settings = {};
-    Object.keys(CFG).forEach((k) => { if (!NOT_LIVE.includes(k)) settings[k] = CFG[k]; });
+    const visible = new Set(META.filter((m) => !m.hidden).map((m) => m.name));
+    Object.keys(CFG).forEach((k) => {
+      if (!NOT_LIVE.includes(k) && visible.has(k)) settings[k] = CFG[k];
+    });
     try {
       const r = await fetch("/api/config", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1218,7 +1225,8 @@ async function save() {
     const r = await fetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ settings: CFG }),
+      body: JSON.stringify({ settings: Object.fromEntries(
+      Object.entries(CFG).filter(([k]) => visible.has(k))) }),
     });
     const data = await r.json();
     if (!data.ok) {
@@ -1311,9 +1319,20 @@ async function calibrate() {
     if (!data.ok) { toast("Calibration: " + data.error, true); $("calibrate").disabled = false; return; }
     toast(`Calibrating ${data.entity}…`);
     const started = Date.now();
+    let misses = 0;
     const poll = setInterval(async () => {
       const h = await fetch("/health").then((x) => x.json()).catch(() => null);
-      if (!h) return;
+      if (!h) {
+        // the app restarts itself on save, so a few misses are normal; never
+        // leave the button disabled and the interval running for the page's life
+        if (++misses > 5) {
+          clearInterval(poll);
+          $("calibrate").disabled = false;
+          toast("Lost contact while calibrating", true);
+        }
+        return;
+      }
+      misses = 0;
       if (h.stats && h.stats.calibrating) {
         if (Date.now() - started > 30000) { clearInterval(poll); $("calibrate").disabled = false; }
         return;
@@ -1737,6 +1756,32 @@ SETTINGS.extend([
 
 SETTINGS_BY_NAME = {s["name"]: s for s in SETTINGS}
 SECRETS_PATH = Path(os.getenv("SECRETS_FILE") or CONFIG_PATH.with_name("secrets.json"))
+def bindable(host: str) -> bool:
+    """Can this machine actually listen on that address?
+
+    A saved-but-unbindable host used to kill the next start, leaving the settings
+    page unreachable with the bad value already on disk.
+    """
+    try:
+        infos = socket.getaddrinfo(host or "127.0.0.1", 0, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for family, kind, proto, _canon, sockaddr in infos:
+        try:
+            with socket.socket(family, kind, proto) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind(sockaddr)
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def host_for_url(host: str) -> str:
+    """Bracket an IPv6 literal: http://::1:8000/ is not a URL."""
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
 def valid_bind_host(value: str) -> bool:
     """An address uvicorn can actually bind: wildcard, IP literal or hostname."""
     import ipaddress
@@ -1871,7 +1916,7 @@ def load_secrets() -> None:
     if not SECRETS_PATH.exists():
         return
     try:
-        data = json.loads(SECRETS_PATH.read_text())
+        data = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         log.error("ignoring %s: %s", SECRETS_PATH, exc)
         return
@@ -1976,6 +2021,10 @@ def _apply_settings_locked(payload: dict, persist: bool = True) -> tuple[dict, l
         if not valid_bind_host(host):
             errors.append("BIND_HOST: an address such as 127.0.0.1, 0.0.0.0 or a hostname")
             new.pop("BIND_HOST")
+        elif host != BIND_HOST and not bindable(host):
+            # saving this would stop the app from starting at all
+            errors.append(f"BIND_HOST: cannot listen on {host} from this machine")
+            new.pop("BIND_HOST")
         else:
             new["BIND_HOST"] = host
     if "LIGHT_MAP" in new:
@@ -2035,7 +2084,7 @@ def load_config_file(path: Path | None = None) -> None:
     if not path.exists():
         return
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         log.error("ignoring %s: %s", path, exc)
         return
@@ -2544,15 +2593,28 @@ def post_concurrently(bodies: list[dict]) -> list[tuple[str, object]]:
     results: list = [None] * len(bodies)
 
     def run(index: int, body: dict) -> None:
-        results[index] = _safe_post(body)
+        try:
+            results[index] = _safe_post(body)
+        except Exception as exc:              # a worker must never die silently
+            results[index] = ("exc", exc)
 
-    threads = [threading.Thread(target=run, args=(i, b), name=f"post{i}", daemon=True)
-               for i, b in enumerate(bodies)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(timeout=15)
-    return [r if r is not None else ("exc", requests.RequestException("send timeout")) for r in results]
+    # Threads used to be created per call, so the thread-local requests.Session
+    # died with them and every POST paid a fresh TCP handshake. A persistent pool
+    # keeps its workers - and their keep-alive connections - between cycles.
+    global SEND_POOL
+    if SEND_POOL is None:
+        SEND_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="send")
+    futures = [SEND_POOL.submit(run, i, body) for i, body in enumerate(bodies)]
+    for future in futures:
+        try:
+            future.result(timeout=REQUEST_TIMEOUT + 2)
+        except FuturesTimeout:
+            stats["send_timeouts"] = stats.get("send_timeouts", 0) + 1
+        except Exception as exc:
+            stats["send_errors"] = stats.get("send_errors", 0) + 1
+            log.debug("post worker failed: %s", exc)
+    return [r if r is not None else ("exc", requests.RequestException("send timeout"))
+            for r in results]
 
 
 
@@ -2574,11 +2636,14 @@ def group_payloads(payloads: dict[str, dict]) -> list[tuple[dict, list[str]]]:
 
 def sender_loop() -> None:
     """Post the newest colours at the rate the Zigbee radio can actually take."""
-    try:
-        _sender_loop()
-    except Exception:                     # never lose the sender for good
-        log.exception("sender loop stopped unexpectedly")
-        stats["send_errors"] = stats.get("send_errors", 0) + 1
+    while not stop_event.is_set():
+        try:
+            _sender_loop()
+        except Exception:                 # never lose the sender for good
+            log.exception("sender loop stopped unexpectedly; restarting")
+            stats["send_errors"] = stats.get("send_errors", 0) + 1
+            stats["sender_restarts"] = stats.get("sender_restarts", 0) + 1
+            stop_event.wait(0.5)          # do not spin on a persistent fault
 
 
 def _sender_loop() -> None:
@@ -2778,8 +2843,17 @@ def _sender_loop() -> None:
                     if target is not None:
                         target.errors += 1
                         target.last_attempted = None    # refused: retry freely
-                        target.last_sent = target.last_sent
-                note_failure()
+                # Only reachability opens the host breaker. A 400/404/422 is one
+                # misconfigured entity; counting it paused every light for 10 s,
+                # over and over, while the probe answered 200 each time.
+                if response.status_code >= 500:
+                    note_failure()
+                else:
+                    stats["refused"] = stats.get("refused", 0) + 1
+                    if time.time() - _last_error_log > 30:
+                        _last_error_log = time.time()
+                        log.error("HA refused %s: %s", response.status_code,
+                                  response.text[:200])
                 now = time.time()
                 if now - _last_error_log > 30:
                     _last_error_log = now
@@ -2867,6 +2941,7 @@ AUTOTUNE_MIN_FPS = 4.0              # never set a capture rate the tuner cannot 
 AUTOTUNE_MAX_FPS = 30.0             # capture, colour work and the UI all share one core
 
 
+SEND_POOL: ThreadPoolExecutor | None = None     # keep-alive lives with its threads
 AUTOTUNE_COLOURS = ([255, 190, 110], [120, 180, 255], [255, 120, 150],
                      [150, 255, 150], [230, 230, 230])
 
@@ -3241,11 +3316,22 @@ def capture_loop() -> None:
         log.error("Screen capture unavailable (%s). Run this on the machine with the monitor.", exc)
         return
 
-    monitors = grabber.monitors
-    index, warning = pick_monitor(monitors, MONITOR_INDEX)
-    if warning:
-        log.error(warning)
-    monitor = monitors[index]
+    try:
+        monitors = grabber.monitors
+        index, warning = pick_monitor(monitors, MONITOR_INDEX)
+        if warning:
+            log.error(warning)
+        monitor = monitors[index]
+    except Exception as exc:
+        # the prologue used to be unguarded: a monitor list that did not match
+        # MONITOR_INDEX killed capture while /health still answered 200
+        stats["capture_errors"] = stats.get("capture_errors", 0) + 1
+        log.error("could not select a monitor (%s) - capture stopped", exc)
+        try:
+            grabber.close()
+        except Exception:
+            pass
+        return
     seen_rev = -1                                 # geometry is built on the first pass
     grab_rect = grid_zeros = cell_size = None
     log.info("Capturing monitor %s (%sx%s) as %s grid; %d light(s): %s",
@@ -3825,7 +3911,7 @@ def restart_self(reason: str = "", delay: float = 0.8) -> bool:
     guard = _restart_guard_path()
     now = time.time()
     try:
-        last = float(guard.read_text().strip() or 0)
+        last = float(guard.read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
         last = 0.0
     if AUTO_RESTART and now - last < 30:
@@ -3837,7 +3923,7 @@ def restart_self(reason: str = "", delay: float = 0.8) -> bool:
         return False
     try:
         guard.parent.mkdir(parents=True, exist_ok=True)
-        guard.write_text(f"{now}")
+        guard.write_text(f"{now}", encoding="utf-8")
     except OSError:
         pass
 
@@ -4217,7 +4303,7 @@ def _run() -> None:
     def _expire_restart_guard() -> None:
         try:
             guard = _restart_guard_path()
-            if guard.exists() and time.time() - float(guard.read_text().strip() or 0) > 30:
+            if guard.exists() and time.time() - float(guard.read_text(encoding="utf-8").strip() or 0) > 30:
                 guard.unlink()
         except (OSError, ValueError):
             pass
@@ -4273,7 +4359,7 @@ def _run() -> None:
         log.warning("settings UI on http://%s:%s — it has no authentication, so anyone "
                     "who can reach that port can change settings", BIND_HOST, port)
 
-    url = f"http://{host}:{port}/"
+    url = f"http://{host_for_url(host)}:{port}/"
     if mode == "server":
         if not HA_TOKEN and not args.no_browser:
             # nothing to mirror yet: hand the user the settings page
@@ -4293,6 +4379,10 @@ def _run() -> None:
         raise SystemExit(f"the settings server did not start on {url} - check the log")
     log.info("serving %s in %s mode", url, mode)
     close_splash()                       # the window is about to appear
+    try:                                 # we got this far: not a crash loop
+        _restart_guard_path().unlink(missing_ok=True)
+    except OSError:
+        pass
     try:
         code = run_window(url) if mode == "window" else run_tray(url)
     finally:

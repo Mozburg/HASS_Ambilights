@@ -3,14 +3,22 @@
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt -r requirements-gui.txt pyinstaller
+function Invoke-Step {
+    param([scriptblock]$Command, [string]$What)
+    & $Command
+    # Windows PowerShell 5.1 ignores $ErrorActionPreference for native commands,
+    # so without this a failed build still printed the green success line
+    if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
+}
+
+Invoke-Step { python -m pip install --upgrade pip } "pip upgrade"
+Invoke-Step { python -m pip install -r requirements.txt -r requirements-gui.txt pyinstaller } "dependency install"
 
 # icon, splash and Windows version resource are generated from __version__
-python packaging/make_assets.py
-python packaging/make_splash.py
+Invoke-Step { python packaging/make_assets.py } "icon and version resource"
+Invoke-Step { python packaging/make_splash.py } "splash image"
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed `
+Invoke-Step { python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --name HassAmbilights `
   --icon packaging/icon.ico `
   --splash packaging/splash.png `
@@ -20,7 +28,9 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --collect-submodules webview `
   --hidden-import pystray._win32 `
   --exclude-module matplotlib `
-  hass_ambilights.py
+  hass_ambilights.py } "PyInstaller"
+
+if (-not (Test-Path "dist/HassAmbilights.exe")) { throw "dist/HassAmbilights.exe was not produced" }
 
 Write-Host ""
 Write-Host "Built dist\HassAmbilights.exe" -ForegroundColor Green

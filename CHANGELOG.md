@@ -8,6 +8,39 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.1] — 2026-11-11
+
+Wave three of the audit: the failure modes that made a broken install look healthy.
+
+### Fixed
+- **One bad entity id no longer pauses every light.** Any non-BUSY 4xx fed the *host*
+  circuit breaker, so a single misconfigured `entity_id` opened a 10 s global pause every
+  10 s while the recovery probe answered 200. Only 5xx and connection failures open the
+  breaker now; a 4xx is counted as `refused` and logged once.
+- **The sender restarts after an exception** instead of ending the thread (the incident
+  that froze the lights with `/health` still at 200). It backs off 0.5 s and counts
+  `sender_restarts`.
+- **The capture prologue is guarded.** A monitor list that did not match `MONITOR_INDEX`
+  killed capture silently; it now logs, counts `capture_errors`, closes the grabber and
+  stops cleanly.
+- **Concurrent sends keep their connections.** Threads were created per request, so the
+  thread-local `requests.Session` — and its keep-alive — died with them. A persistent pool
+  keeps the workers, and a worker exception can no longer be swallowed.
+- **`BIND_HOST` must be bindable.** Saving an address this machine cannot listen on used to
+  succeed, then kill the restart and leave the settings page unreachable. IPv6 literals are
+  bracketed in URLs too, which they never were.
+- **The restart guard clears as soon as the app serves**, so a legitimate second change
+  inside 30 s is no longer refused as a suspected crash loop.
+- **UI: clearing a light's zones saved as "all"** — the exact opposite — and is now dropped;
+  the calibrate poll gives up after five missed replies instead of spinning forever with
+  the button disabled; a page load no longer fires a live POST; and saving no longer
+  writes the hidden legacy keys back into `config.json`.
+- **`build.ps1` fails when a step fails.** Windows PowerShell 5.1 ignores
+  `$ErrorActionPreference` for native commands, so a failed build still printed the green
+  "Built dist\HassAmbilights.exe" line.
+- **The Windows CI job now runs the test suite**, so `os.name == "nt"` branches are
+  exercised at all.
+
 ## [2.9.0] — 2026-11-11
 
 The colour path, second pass. The first fix below is a correction: 2.7.1 claimed to fix

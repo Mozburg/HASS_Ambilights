@@ -802,12 +802,12 @@ assert m.get_config()["version"] == _ver
 assert f'v{_ver}' in m.UI_HTML or 'id="version"' in m.UI_HTML, "the UI must show the version"
 _changelog = Path(m.__file__).with_name("CHANGELOG.md")
 if _changelog.exists():
-    text = _changelog.read_text()
+    text = _changelog.read_text(encoding="utf-8")
     assert f"## [{_ver}]" in text, f"CHANGELOG has no section for {_ver}"
     # the version in the README must not drift from the code
     readme = Path(m.__file__).with_name("README.md")
     if readme.exists():
-        assert _ver in readme.read_text(), "README does not mention the current version"
+        assert _ver in readme.read_text(encoding="utf-8"), "README does not mention the current version"
 print(f"versioning ok: {_ver} exposed in /health, /api/config, UI and CHANGELOG")
 
 # --- auto tune: find the fastest pacing the radio accepts -------------------
@@ -925,7 +925,7 @@ assert m.health()["tuning"] is False, "a finished tune must leave the radio free
 m.TUNING.set()
 assert m.health()["tuning"] is True, "health must show the radio is being measured"
 m.TUNING.clear()
-_source = Path(m.__file__).read_text()
+_source = Path(m.__file__).read_text(encoding="utf-8")
 assert "tuning = TUNING.is_set()" in _source and "if not tuning and should_send" in _source, \
     "capture must skip both stamping and sending while tuning"
 _failed = m.autotune(verbose=False)      # DRY_RUN back on below
@@ -1187,7 +1187,7 @@ print("splash: updates its text, closes, and never raises")
 _assets = _load("make_assets", "packaging/make_assets.py")
 _info = _Path(tempfile.mkdtemp()) / "version_info.txt"
 _assets.make_version_info(_info, "9.9.9")
-_text = _info.read_text()
+_text = _info.read_text(encoding="utf-8")
 assert "StringStruct('FileDescription', 'HASS Ambilights')" in _text, "Task Manager name"
 assert "StringStruct('ProductName', 'HASS Ambilights')" in _text
 assert "'Hass Ambilights'" not in _text, "old brand left in the version resource"
@@ -1204,8 +1204,8 @@ with _Image.open(_png) as _im:
     assert _im.format == "PNG"
 print(f"splash image: {_png.stat().st_size} bytes, 620x360 PNG")
 
-_ps1 = (_ROOT / "packaging" / "build.ps1").read_text()
-_yml = (_ROOT / ".github" / "workflows" / "windows.yml").read_text()
+_ps1 = (_ROOT / "packaging" / "build.ps1").read_text(encoding="utf-8")
+_yml = (_ROOT / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8")
 for _name, _script in (("build.ps1", _ps1), ("windows.yml", _yml)):
     assert "--splash packaging/splash.png" in _script, _name
     assert "make_splash.py" in _script, f"{_name} must generate the splash"
@@ -1413,7 +1413,7 @@ _child = _subprocess.run(
     capture_output=True, text=True, timeout=60,
     env={**__import__("os").environ, "LOG_FILE": str(_log_path)})
 assert _child.returncode == 0, _child.stderr[-400:]
-assert _log_path.exists() and "written after redirect" in _log_path.read_text(), \
+assert _log_path.exists() and "written after redirect" in _log_path.read_text(encoding="utf-8"), \
     "a windowed run must write where it can be read"
 
 # --- windows cursor flicker (mss CAPTUREBLT) ------------------------------
@@ -1601,18 +1601,18 @@ _cfg = _pathlib.Path(tempfile.mkdtemp()) / "config.json"
 _orig_cfg, _orig_mix = m.CONFIG_PATH, m.COLOUR_BLEND
 m.CONFIG_PATH = _cfg
 m.post_config({"settings": {"COLOUR_BLEND": 0.25}})          # persisted baseline
-_baseline = _json.loads(_cfg.read_text())["COLOUR_BLEND"]
+_baseline = _json.loads(_cfg.read_text(encoding="utf-8"))["COLOUR_BLEND"]
 assert _baseline == 0.25 and m.get_config()["unsaved"] is False
 
 _live = m.post_config({"settings": {"COLOUR_BLEND": 0.9}, "persist": False})
 assert _live["persisted"] is False
 assert m.COLOUR_BLEND == 0.9, "a live edit must reach the running process"
-assert _json.loads(_cfg.read_text())["COLOUR_BLEND"] == 0.25, "live edit must not touch the file"
+assert _json.loads(_cfg.read_text(encoding="utf-8"))["COLOUR_BLEND"] == 0.25, "live edit must not touch the file"
 assert m.get_config()["unsaved"] is True
 assert m.get_config()["saved_settings"]["COLOUR_BLEND"] == 0.25
 
 m.post_config({"settings": {"COLOUR_BLEND": 0.9}})           # now persist
-assert _json.loads(_cfg.read_text())["COLOUR_BLEND"] == 0.9
+assert _json.loads(_cfg.read_text(encoding="utf-8"))["COLOUR_BLEND"] == 0.9
 assert m.get_config()["unsaved"] is False
 m.CONFIG_PATH, m.COLOUR_BLEND = _orig_cfg, _orig_mix
 print("live apply ok: applies without writing, Save persists, Revert has a target")
@@ -1670,7 +1670,7 @@ assert not _re.search(r'^\$\("[A-Za-z0-9_-]+"\)\.addEventListener', _page, _re.M
 _req = __import__("pathlib").Path(m.__file__).with_name("requirements.txt")
 if _req.exists():
     names = set()
-    for line in _req.read_text().splitlines():
+    for line in _req.read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line:
             names.add(line.split("==")[0].split(">")[0].split("<")[0].strip().lower())
@@ -1683,7 +1683,7 @@ _cfg_path = __import__("pathlib").Path(_tempfile.mkdtemp()) / "config.json"
 _orig_cfg = m.CONFIG_PATH
 m.CONFIG_PATH = _cfg_path
 m.persist_config()
-_written = _json.loads(_cfg_path.read_text())
+_written = _json.loads(_cfg_path.read_text(encoding="utf-8"))
 assert "HA_TOKEN" not in _written, "secrets must not be written to config.json"
 assert "BIND_HOST" in _written and "HA_URL" in _written
 m.CONFIG_PATH = _orig_cfg

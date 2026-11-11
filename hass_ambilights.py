@@ -84,7 +84,7 @@ def _requirements() -> tuple:
     """requirements.txt next to the script, else the embedded list."""
     req = Path(__file__).resolve().with_name("requirements.txt")
     try:
-        lines = [line.split("#")[0].strip() for line in req.read_text().splitlines()]
+        lines = [line.split("#")[0].strip() for line in req.read_text(encoding="utf-8").splitlines()]
     except OSError:
         lines = []
     lines = [line for line in lines if line]
@@ -116,7 +116,7 @@ def _bootstrap_venv():
 
     marker = venv_dir / ".deps-ok"
     wanted = " ".join(packages)
-    if python.exists() and marker.exists() and marker.read_text().strip() == wanted \
+    if python.exists() and marker.exists() and marker.read_text(encoding="utf-8").strip() == wanted \
             and _deps_import(python):
         return python                     # provisioned and actually importable
     if venv_dir.exists():
@@ -147,7 +147,7 @@ def _bootstrap_venv():
             "Check your network and requirements.txt, then run this again.\n"
             "To install by hand:\n    %s -m pip install %s"
             % (python, " ".join(packages)))
-    marker.write_text(wanted + "\n")
+    marker.write_text(wanted + "\n", encoding="utf-8")
     return python
 
 
@@ -1916,7 +1916,7 @@ def load_secrets() -> None:
     if not SECRETS_PATH.exists():
         return
     try:
-        data = json.loads(SECRETS_PATH.read_text())
+        data = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         log.error("ignoring %s: %s", SECRETS_PATH, exc)
         return
@@ -2084,7 +2084,7 @@ def load_config_file(path: Path | None = None) -> None:
     if not path.exists():
         return
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         log.error("ignoring %s: %s", path, exc)
         return
@@ -3911,7 +3911,7 @@ def restart_self(reason: str = "", delay: float = 0.8) -> bool:
     guard = _restart_guard_path()
     now = time.time()
     try:
-        last = float(guard.read_text().strip() or 0)
+        last = float(guard.read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
         last = 0.0
     if AUTO_RESTART and now - last < 30:
@@ -3923,7 +3923,7 @@ def restart_self(reason: str = "", delay: float = 0.8) -> bool:
         return False
     try:
         guard.parent.mkdir(parents=True, exist_ok=True)
-        guard.write_text(f"{now}")
+        guard.write_text(f"{now}", encoding="utf-8")
     except OSError:
         pass
 
@@ -4303,7 +4303,7 @@ def _run() -> None:
     def _expire_restart_guard() -> None:
         try:
             guard = _restart_guard_path()
-            if guard.exists() and time.time() - float(guard.read_text().strip() or 0) > 30:
+            if guard.exists() and time.time() - float(guard.read_text(encoding="utf-8").strip() or 0) > 30:
                 guard.unlink()
         except (OSError, ValueError):
             pass

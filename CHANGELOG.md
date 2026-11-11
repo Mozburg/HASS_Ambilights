@@ -8,6 +8,46 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-11-11
+
+Five read-only auditors went over disjoint slices of this file; every finding was
+reproduced here before anything changed. The fixes below are the ones that lost data or
+lied about it. The rest — preview clipping, the un-blended grid preview, the circuit
+breaker, thread recovery, keep-alive, capture copies, packaging and test coverage — are
+recorded with evidence in [docs/audit-2026-11-11.md](docs/audit-2026-11-11.md).
+
+### Fixed
+- **A plain save wiped every setting.** `{"persist": true}` reset the whole config,
+  light map included, because one loop variable held both the `reset` and `persist` flags.
+  Reported by an auditor with the exact request, reproduced, then fixed.
+- **Types are checked, not repaired.** `{"MONITOR_INDEX": 2.6}` silently became monitor 3,
+  and `{"HA_URL": null}` blanked the URL (every later call then failed). Ints must be
+  integral; strings must not be null, lists or objects.
+- **A failed config write is no longer reported as saved.** The API said
+  `persisted: true` for a write that never happened.
+- **The legacy colour keys really do migrate now.** `_translate_legacy_colour` existed
+  since 2.7.0 but nothing called it, so `COLOR_ALGO=mean` never reached `COLOUR_BLEND` —
+  the migration this file claimed to ship. Two auditors found it independently.
+- **Two saves can no longer lose one.** `apply_settings` and the file write are under one
+  re-entrant lock.
+- **A frame is only recorded as attempted if it is actually queued.** Frames were stamped
+  before the auto-tune gate, so every frame during a tune suppressed its colour for three
+  seconds afterwards; the sender also re-read shared state to decide what it had sent, and
+  treated a BUSY frame as confirmed. Refused frames are now retried immediately.
+- **A failed light restore no longer strands the others** on the test colours.
+- **Startup stops lying to systemd**: another instance in `--server` mode exits 3 instead
+  of 0, and the restart-guard timer is a daemon thread (it used to keep the process alive
+  for 31 s after an early return).
+- **Windowed builds log properly**: `basicConfig()` ran before the stream redirect, so
+  every record wrote a "Logging error" traceback instead of the message.
+
+### Added
+- `/health` reports `capture_beat`, `sender_beat` and `pipeline_ok`, so a dead thread is
+  visible instead of answering 200 forever, and `restart_failed` says why a restart did
+  not happen.
+- The test suite runs in a temp directory: it used to rewrite the repository's own
+  `config.json`.
+
 ## [2.7.1] — 2026-11-11
 
 ### Fixed

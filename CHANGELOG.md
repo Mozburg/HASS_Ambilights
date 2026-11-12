@@ -8,6 +8,26 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.4] — 2026-11-11
+
+### Changed
+- **The test suite runs in sections.** It was one 1,800-line script of top-level asserts:
+  the first failure aborted everything after it, a test runner collected nothing, and every
+  failure looked the same from outside. The body is now `tests/suite_body.py`, split at its
+  existing `# --- name ---` markers and executed section by section in one shared namespace
+  — the shared state is deliberate (one fake Home Assistant, one fake screen), so sections
+  still run in order, but a failure names its section and the rest still run.
+
+  ```
+  ✖ mean vs dominant: AssertionError: deliberate failure in the colour section
+  61 passed, 2 failed in 63.8s
+  ```
+
+  `python tests/test_hass_ambilights.py` behaves as before (exit code, `ALL CHECKS PASSED`),
+  and now takes `--list`, `-k <name>` and `--failfast`. If the setup section fails the
+  runner says so once instead of drowning the real cause in `NameError`s. `pytest tests`
+  collects 62 per-section tests in file order, and CI runs both entry points.
+
 ## [2.9.3] — 2026-11-11
 
 ### Security

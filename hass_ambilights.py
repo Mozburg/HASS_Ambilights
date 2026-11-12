@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.10.2"
+__version__ = "2.11.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -293,6 +293,9 @@ SEND_BRIGHTNESS = _env("SEND_BRIGHTNESS", "1") == "1"
 # apparent room brightness constant across hues.
 BRIGHTNESS_FROM = _env("BRIGHTNESS_FROM", "lstar")   # luminance | lstar | value
 BRIGHTNESS_GAMMA = float(_env("BRIGHTNESS_GAMMA", "0.8"))
+# auto: neutral frames ride the bulb's colour-temperature channel, colour stays xy.
+# color_temp: neutral frames only. xy: never (the old behaviour, in every mode).
+WHITE_MODE = _env("WHITE_MODE", "auto")
 
 # What "the colour of the screen" means.
 #   mean     = linear average of the whole region (faithful to radiance)
@@ -408,13 +411,14 @@ class Target:
 
     __slots__ = ("entity_id", "zones", "last_attempted", "last_sent",
                  "last_success_mono", "last_attempt_mono", "posts", "busy", "errors",
-                 "zone_label")
+                 "zone_label", "last_mode")
 
     def __init__(self, entity_id: str, zones: frozenset[int]):
         self.entity_id = entity_id
         self.zones = zones
         self.last_attempted = None
         self.last_sent = None
+        self.last_mode = None
         self.last_success_mono = 0.0
         self.last_attempt_mono = 0.0
         self.posts = 0
@@ -2017,6 +2021,11 @@ SETTINGS = [
     _spec("POST_INTERVAL_FLOOR", "float", 0.15, "Sending", "Fastest pacing",
           "Minimum time between commands. Raise it if the Zigbee controller keeps resetting.",
           min=0.02, max=1.0, step=0.001),
+    _spec("WHITE_MODE", "enum", "auto", "Sending", "White frames",
+          "Bulbs with a colour-temperature channel render white with dedicated warm/cool "
+          "LEDs - more accurate than mixing RGB, and it cannot tint a coloured frame. "
+          "auto = use it whenever the frame is neutral; color_temp = only for neutral "
+          "frames; xy = never.", values=["auto", "color_temp", "xy"], advanced=True),
     _spec("POST_INTERVAL_CEILING", "float", 0.6, "Sending", "Backoff ceiling",
           "Pacing is allowed to grow to this when the radio reports BUSY.",
           min=0.1, max=3.0, step=0.01),
@@ -2709,6 +2718,22 @@ def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> 
     return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
 
 
+# ------------------------------------------------------------- white path ----
+# Neutral frames go out as color_temp_kelvin when the bulb has a white channel: its
+# warm/cool LEDs render a white that RGB mixing cannot match. Everything coloured stays
+# xy. These thresholds are deliberately asymmetric (enter strict, leave loose) so a pale
+# scene cannot toggle the radio between two colour modes every frame.
+WHITE_DUV_LIMIT = 0.006        # furthest off the Planckian locus that still counts as
+                               # white (D65 itself is +0.0033 - it is not on the locus)
+WHITE_ENTER_FRAMES = 3         # consecutive neutral frames before switching to kelvin
+WHITE_ENTER_DWELL = 0.5        # ... and at least this long since the last switch
+WHITE_LEAVE_DWELL = 1.2        # once in kelvin mode, this long before leaving it again
+WARMTH_KELVIN = 0.20           # +1 on the warm slider = 20% warmer (6500K -> ~5200K)
+
+WHITE_STATE: dict[str, dict] = {}
+LIGHT_CAPS: dict[str, dict] = {}
+
+
 # The warm direction in u'v': 6500K is (0.198, 0.468), 3000K is (0.257, 0.521), so both
 # components rise as the colour temperature falls. Scaled so a full slider is about
 # 1300K of shift - the range that reads as "too warm / too cool" under a lamp.
@@ -2763,13 +2788,112 @@ def calibrate_xy(xy, hue_deg: float, chroma: float, warmth: float = 0.0):
     return edge if (valid_xy(edge) and low > 0.004) else tuple(xy)
 
 
+# ---------------------------------------------------------------- neutral ----
+def _planck_uv(kelvin: float) -> tuple[float, float]:
+    """CIE 1960 (u, v) of the Planckian locus, good from 1000K to 15000K."""
+    t = max(1000.0, min(15000.0, float(kelvin)))
+    u = ((0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t * t)
+         / (1 + 8.42420235e-4 * t + 7.08145163e-7 * t * t))
+    v = ((0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t * t)
+         / (1 - 2.89741816e-5 * t + 1.61456053e-7 * t * t))
+    return u, v
+
+
+def uv1960_from_xy(xy) -> tuple[float, float]:
+    x, y = xy
+    d = -2.0 * x + 12.0 * y + 3.0
+    if abs(d) < 1e-9:
+        return 0.0, 0.0
+    return 4.0 * x / d, 6.0 * y / d
+
+
+def cct_from_xy(xy) -> tuple[float, float]:
+    """(kelvin, duv) - the nearest point on the Planckian locus and the distance to it.
+
+    duv is signed: positive is above the locus (greener), negative below (pinker). It is
+    the number that matters for deciding whether "white" can be expressed as a colour
+    temperature at all - a lamp asked for a 4200K with duv 0.02 will answer accurately
+    about the kelvin and not at all about the tint.
+    """
+    u, v = uv1960_from_xy(xy)
+    best = None
+    for kelvin in range(1500, 10001, 20):
+        pu, pv = _planck_uv(kelvin)
+        d2 = (u - pu) ** 2 + (v - pv) ** 2
+        if best is None or d2 < best[0]:
+            best = (d2, kelvin, pu, pv)
+    d2, kelvin, pu, pv = best
+    duv = math.copysign(math.sqrt(d2), v - pv)
+    # step once more either side so a point between two samples lands on the nearer
+    for neighbour in (kelvin - 20, kelvin + 20):
+        nu, nv = _planck_uv(neighbour)
+        if (u - nu) ** 2 + (v - nv) ** 2 < d2:
+            d2, kelvin, pu, pv = (u - nu) ** 2 + (v - nv) ** 2, neighbour, nu, nv
+            duv = math.copysign(math.sqrt(d2), v - pv)
+    return float(kelvin), duv
+
+
+def is_white(colour: dict) -> bool:
+    """Neutral enough that a colour temperature describes it faithfully."""
+    xy = tuple(colour.get("xy") or (0.3127, 0.3290))
+    # Distance from D65 is NOT the test: a 2700K white is nowhere near D65 in chroma and
+    # is still exactly what the kelvin channel exists for. Tint (duv) is the test.
+    _, duv = cct_from_xy(xy)
+    return abs(duv) <= WHITE_DUV_LIMIT
+
+
+def plan_white_mode(entity: str, colour: dict, now: float) -> tuple[bool, float]:
+    """Decide xy vs colour temperature for this frame, with hysteresis.
+
+    Entering needs a few consecutive neutral frames (one near-white frame is how a film's
+    credits start); leaving needs a clearly coloured frame or a short dwell, so a pale
+    scene cannot toggle the radio between two colour modes every frame.
+
+    The decision is *always* gated on this frame being white and in the bulb's range: a
+    red frame must never be expressible as a colour temperature, hysteresis or not.
+    """
+    caps = LIGHT_CAPS.get(entity or "", {})
+    state = WHITE_STATE.setdefault(entity or "", {"cct": False, "since": now, "run": 0})
+    kelvin, duv = cct_from_xy(tuple(colour.get("xy") or D65_XY))
+    in_range = caps.get("min_k", 2000) <= kelvin <= caps.get("max_k", 6500)
+
+    if WHITE_MODE == "xy" or not caps.get("cct") or SEND_MODE == "rgb":
+        state.update(cct=False, run=0)
+        return False, kelvin
+
+    neutral = is_white(colour) and in_range
+    # wider than the entry threshold: leaving early is worse than staying a frame too long
+    clearly_coloured = (not neutral) and (abs(duv) > WHITE_DUV_LIMIT * 2.5
+                                          or not in_range)
+
+    if neutral:
+        state["run"] += 1
+    else:
+        state["run"] = 0
+
+    if not state["cct"]:
+        if state["run"] >= WHITE_ENTER_FRAMES and now - state["since"] >= WHITE_ENTER_DWELL:
+            state.update(cct=True, since=now, run=0)
+    elif clearly_coloured:
+        state.update(cct=False, since=now, run=0)
+    elif not neutral and now - state["since"] >= WHITE_LEAVE_DWELL:
+        state.update(cct=False, since=now, run=0)
+
+    return (bool(state["cct"]) and neutral), kelvin
+
+
 def apply_calibration(colour: dict, cal: dict) -> dict:
     """Apply one light's calibration to its colour, in place."""
     if not cal:
         return colour
+    # warmth belongs to the white path: it is applied as a kelvin shift when the bulb
+    # has a colour-temperature channel, and as a locus shift only when white has to go
+    # out as xy. It must not tint a coloured frame.
+    warmth = float(cal.get("warmth", 0.0)) if colour.get("white") else 0.0
     colour["xy"] = [round(v, 4) for v in calibrate_xy(
-        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)),
-        float(cal.get("warmth", 0.0)))]
+        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)), warmth)]
+    if warmth:
+        colour["warmth"] = warmth
     colour["calibration_level"] = float(cal.get("level", 1.0))
     colour["rgb"] = srgb_from_xy(tuple(colour["xy"]), max(colour.get("luminance", 0.0), 1e-4))
     if "dominant" in colour:
@@ -2814,6 +2938,11 @@ def should_send(target: Target, colour: dict, brightness: int) -> bool:
     """Decide from the screen, never from a retry queue."""
     last = target.last_attempted
     if last is None:
+        return True
+    # switching xy <-> colour temperature changes what the lamp is told even when the
+    # chromaticity is identical, so it counts as a change
+    wanted_mode = colour.get("white_mode")
+    if wanted_mode and target.last_mode and wanted_mode != target.last_mode:
         return True
     d_e = delta_e(colour["rgb"], last[0])
     if d_e >= MIN_DELTA_E:
@@ -2894,13 +3023,29 @@ def preview_colour(colour: dict) -> dict:
     }
 
 
-def build_payload(colour: dict) -> dict:
+def build_payload(colour: dict, entity: str = "", now: float | None = None) -> dict:
     """Service data for one light (no entity_id, so identical ones can merge)."""
     payload: dict = {}
     preview = preview_colour(colour)
     xy = tuple(preview["xy"])
     stats["saturation_k"] = preview["saturation_k"]
-    if SEND_MODE == "rgb":
+    if colour.get("white_mode"):
+        use_cct = colour["white_mode"] == "color_temp"
+        kelvin = float(colour.get("kelvin") or 6500.0)
+    else:                                   # direct callers (calibration, tests)
+        use_cct, kelvin = plan_white_mode(
+            entity, {"xy": xy, "luminance": colour.get("luminance")},
+            time.perf_counter() if now is None else now)
+    if use_cct:
+        # the bulb's own white LEDs: warmer/cooler exactly, and no RGB mixing
+        warmth = float(colour.get("warmth") or 0.0)
+        if warmth:
+            kelvin *= 1.0 + WARMTH_KELVIN * warmth
+        caps = LIGHT_CAPS.get(entity or "", {})
+        kelvin = max(caps.get("min_k", 2000), min(caps.get("max_k", 6500), kelvin))
+        payload["color_temp_kelvin"] = int(round(kelvin))
+        stats["cct_posts"] = stats.get("cct_posts", 0) + 1
+    elif SEND_MODE == "rgb":
         # peak-normalised so HA reads the right chromaticity; the level is carried
         # by brightness. Deriving it from the mean luminance while the colour came
         # from the cluster is what made rgb mode send pink instead of red.
@@ -3115,7 +3260,7 @@ def _sender_loop() -> None:
         for entity, colour in item.items():
             ages.append((time.perf_counter() - colour.get("measured_at", time.perf_counter())) * 1000.0)
             try:
-                payloads[entity] = build_payload(colour)
+                payloads[entity] = build_payload(colour, entity)
             except Exception as exc:          # one bad colour must not kill the thread
                 stats["send_errors"] = stats.get("send_errors", 0) + 1
                 log.error("Could not build a payload for %s: %s", entity, exc)
@@ -3131,6 +3276,7 @@ def _sender_loop() -> None:
                 target = by_entity.get(entity)
                 if target is not None:
                     target.last_attempted = (tuple(item[entity]["rgb"]), body.get("brightness"))
+                    target.last_mode = item[entity].get("white_mode")
 
         if DRY_RUN:
             for body, entities in groups:
@@ -3812,12 +3958,20 @@ def capture_loop() -> None:
                 if "dominant" in colour:
                     colour["xy"] = colour["dominant"]
                     colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
+                # decided on the measured colour, before any calibration moves it
+                colour["white"] = is_white(colour)
                 cal = calibration_for(target.entity_id)
                 if cal:
                     apply_calibration(colour, cal)
                 # outside the branch: with the colour at mean and the brightness
                 # blend at 1 there is no "dominant" key, and the level was dropped
                 colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
+                # The mode is decided from measured frames, not from sends: a static
+                # white screen must still be able to settle onto the kelvin channel, and
+                # dedupe would otherwise mean the state never advances at all.
+                use_cct, kelvin = plan_white_mode(target.entity_id, colour, measured_at)
+                colour["white_mode"] = "color_temp" if use_cct else "xy"
+                colour["kelvin"] = kelvin
                 colour["measured_at"] = measured_at
                 colour["preview"] = preview_colour(colour)
                 light_report[target.entity_id] = colour
@@ -3827,6 +3981,7 @@ def capture_loop() -> None:
                     # record it now: the sender may not post for a few ms, and
                     # dedupe has to hold for that window too
                     target.last_attempted = (tuple(colour["rgb"]), brightness)
+                    target.last_mode = colour.get("white_mode")
                     target.last_attempt_mono = time.perf_counter()
 
             with state_lock:
@@ -3968,6 +4123,7 @@ async def lifespan(_app: FastAPI):
         PERSISTED.update(settings_snapshot())
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
     check_ha()
+    refresh_light_caps()          # which lights have a white channel, and its range
     stop_event.clear()
     worker = threading.Thread(target=capture_loop, name="capture", daemon=True)
     poster = threading.Thread(target=sender_loop, name="sender", daemon=True)
@@ -4077,6 +4233,40 @@ def get_monitors():
 # resolves device areas too, so one render is enough for the whole list.
 AREA_TEMPLATE = ("{% for s in states.light %}{{ s.entity_id }}={{ area_name(s.entity_id) or '' }}\n"
                  "{% endfor %}")
+
+
+def refresh_light_caps(states: list | None = None) -> int:
+    """Remember which lights have a colour-temperature channel, and its range.
+
+    Best effort: a light we could not read simply stays on xy, which is what every light
+    used before this existed.
+    """
+    if states is None:
+        try:
+            response = requests.get(f"{HA_URL}/api/states", headers=auth_headers(),
+                                    timeout=REQUEST_TIMEOUT)
+            if response.status_code != 200:
+                return 0
+            states = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            log.debug("could not read light capabilities: %s", exc)
+            return 0
+    counted = 0
+    for state in states if isinstance(states, list) else []:
+        entity = str(state.get("entity_id") or "")
+        if not entity.startswith("light."):
+            continue
+        attrs = state.get("attributes") or {}
+        modes = [str(m) for m in (attrs.get("supported_color_modes") or [])]
+        LIGHT_CAPS[entity] = {
+            "cct": "color_temp" in modes,
+            "min_k": float(attrs.get("min_color_temp_kelvin") or 2000),
+            "max_k": float(attrs.get("max_color_temp_kelvin") or 6500),
+            "modes": modes,
+        }
+        counted += 1
+    stats["lights_with_white_channel"] = sum(1 for c in LIGHT_CAPS.values() if c["cct"])
+    return counted
 
 
 def fetch_areas() -> dict[str, str]:
@@ -4291,6 +4481,7 @@ def get_lights(refresh: bool = False):
     except ValueError:
         return {"ok": False, "lights": [], "detail": "Home Assistant returned non-JSON"}
 
+    refresh_light_caps(states)          # same payload: no extra request
     areas = fetch_areas()
     found = []
     for state in states if isinstance(states, list) else []:
@@ -4307,6 +4498,7 @@ def get_lights(refresh: bool = False):
             # only these modes can express an arbitrary hue
             "color_capable": any(m in ("xy", "rgb", "rgbw", "rgbww", "hs", "rgbxy") for m in modes),
             "area": areas.get(entity, ""),
+            "white_channel": bool(LIGHT_CAPS.get(entity, {}).get("cct")),
         })
     # grouped by area in the UI, so sort that way: named areas first, unassigned last
     found.sort(key=lambda l: (l["area"] == "", l["area"].lower(), not l["color_capable"],

@@ -2,6 +2,7 @@
   "HA_URL": "http://192.168.1.10:8123",
   "COLOUR_BLEND": 0.5,
   "BRIGHTNESS_FOLLOW_COLOUR": true,
+  "WHITE_MODE": "auto",
   "BRIGHTNESS_BLEND": 0.5,
   "CHROMA_FLOOR": 0.01,
   "HUE_BINS": 24,

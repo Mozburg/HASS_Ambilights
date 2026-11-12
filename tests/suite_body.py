@@ -1474,9 +1474,13 @@ m.CALIBRATION["light.warm"] = {"hue": 0.0, "chroma": 1.0, "level": 1.0, "warmth"
 assert m.save_calibration()
 m.CALIBRATION.clear(); m.load_calibration()
 assert m.CALIBRATION["light.warm"]["warmth"] == 0.7, m.CALIBRATION
-_applied = m.apply_calibration({"rgb": [255, 255, 255], "xy": list(_white), "luminance": 0.6},
-                              m.calibration_for("light.warm"))
-assert _applied["xy"][0] > _white[0], "a stored warmth must reach what is sent"
+_applied = m.apply_calibration({"rgb": [255, 255, 255], "xy": list(_white), "luminance": 0.6,
+                               "white": True}, m.calibration_for("light.warm"))
+assert _applied["xy"][0] > _white[0], "a stored warmth must reach a white frame"
+_colour_frame = m.apply_calibration({"rgb": [255, 0, 0], "xy": list(m.xy_from_rgb([255, 0, 0])),
+                                     "luminance": 0.4}, m.calibration_for("light.warm"))
+assert _colour_frame["xy"] == [round(v, 4) for v in m.xy_from_rgb([255, 0, 0])], (
+    "warmth is a white correction: it must not tint a coloured frame")
 m.CALIBRATION.clear(); m.save_calibration()
 print("calibration ok: warmth round-trips through calibration.json into the payload")
 
@@ -1506,6 +1510,72 @@ assert m.preview_colour({"rgb": [255, 153, 153],
                          "xy": list(m.xy_from_rgb([255, 153, 153])),
                          "luminance": 0.4})["hex"] == "#ff9999", "a muted colour stays muted"
 print("calibration ok: swatch shows the colour, brightness is the number that dims")
+
+# --- white frames ride the bulb's own colour-temperature channel -------------
+_k, _d = m.cct_from_xy((0.3127, 0.3290))
+assert 6300 < _k < 6700, f"D65 should read ~6500K, got {_k}"
+assert 0.002 < _d < 0.005, f"D65 sits just above the locus, got duv {_d}"
+_k, _d = m.cct_from_xy((0.4476, 0.4074))
+assert 2750 < _k < 2950 and abs(_d) < 0.002, f"illuminant A is 2856K on the locus: {_k} {_d}"
+print("cct ok: known chromaticities map to the right kelvin and tint")
+
+for _rgb, _expect in (([255, 255, 255], True), ([128, 128, 128], True),
+                      ([255, 214, 180], True),      # warm white: still white
+                      ([200, 200, 210], True),      # cool white
+                      ([255, 0, 0], False), ([0, 0, 255], False),
+                      ([120, 200, 120], False)):    # green tint is not white
+    assert m.is_white({"xy": list(m.xy_from_rgb(_rgb))}) is _expect, (_rgb, _expect)
+print("cct ok: warm and cool whites qualify, colour and green-tinted frames do not")
+
+m.LIGHT_CAPS["light.white"] = {"cct": True, "min_k": 2000.0, "max_k": 9009.0,
+                               "modes": ["color_temp", "xy"]}
+m.LIGHT_CAPS["light.plain"] = {"cct": False, "min_k": 2000.0, "max_k": 6500.0,
+                               "modes": ["xy"]}
+_white = {"xy": list(m.xy_from_rgb([250, 250, 245])), "luminance": 0.5}
+_red = {"xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.4}
+
+m.WHITE_MODE = "auto"; m.WHITE_STATE.clear()
+_modes = [m.plan_white_mode("light.white", _white, 100 + i * 0.3)[0] for i in range(4)]
+assert _modes[:2] == [False, False] and _modes[2] and _modes[3], (
+    f"a neutral scene should settle into kelvin after a few frames: {_modes}")
+m.WHITE_STATE.clear()
+assert not any(m.plan_white_mode("light.plain", _white, 100 + i)[0] for i in range(5)), (
+    "a light with no colour-temperature channel must stay on xy")
+m.WHITE_STATE.clear()
+for i in range(4):
+    m.plan_white_mode("light.white", _white, 100 + i * 0.3)
+assert m.plan_white_mode("light.white", _red, 102)[0] is False, (
+    "a red frame must never be expressed as a colour temperature, dwell or not")
+print("cct ok: neutral frames enter after a few, colour frames leave at once")
+
+m.WHITE_MODE = "xy"; m.WHITE_STATE.clear()
+assert not any(m.plan_white_mode("light.white", _white, 200 + i * 0.3)[0] for i in range(6))
+m.WHITE_MODE = "auto"
+print("cct ok: WHITE_MODE=xy keeps the old behaviour")
+
+# the payload has to change, and warmth has to stay out of the coloured path
+m.WHITE_STATE.clear()
+m.LIGHT_CAPS["light.white"]["cct"] = True
+_bodies = [m.build_payload(dict(_white, white=True), "light.white", now=300 + i * 0.3)
+           for i in range(5)]
+assert "xy_color" in _bodies[0] and "color_temp_kelvin" in _bodies[-1], _bodies
+assert 2000 <= _bodies[-1]["color_temp_kelvin"] <= 9009, _bodies[-1]
+print(f"cct ok: the neutral payload becomes color_temp_kelvin "
+      f"{_bodies[-1]['color_temp_kelvin']}K")
+
+_cal = {"hue": 0.0, "chroma": 1.0, "level": 1.0, "warmth": 0.8}
+_coloured = m.apply_calibration({"xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.4},
+                               _cal)
+assert _coloured["xy"] == [round(v, 4) for v in m.xy_from_rgb([255, 0, 0])], (
+    f"warmth must not tint a coloured frame: {_coloured['xy']}")
+_whiteframe = m.apply_calibration({"xy": list(m.xy_from_rgb([255, 255, 255])),
+                                   "luminance": 0.5, "white": True}, _cal)
+assert _whiteframe["xy"] != [round(v, 4) for v in m.xy_from_rgb([255, 255, 255])], (
+    "on a white frame the warmth still has to do something")
+print("cct ok: warmth moves white and leaves colour alone")
+
+m.WHITE_MODE = "auto"; m.WHITE_STATE.clear()
+m.LIGHT_CAPS.pop("light.white", None); m.LIGHT_CAPS.pop("light.plain", None)
 
 # the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
 import types as _types
@@ -1597,6 +1667,7 @@ assert "cal-hue" in _ui and "cal-chroma" in _ui and "cal-level" in _ui
 assert 'slider("cal-warmth"' in _ui and 'wire("cal-warmth", "warmth")' in _ui
 assert "chroma: white ? 1.0 : CAL.chroma" in _ui
 assert "level_scale: CAL.level" in _ui, "the brightness slider must reach every frame"
+assert any(s["name"] == "WHITE_MODE" for s in m.SETTINGS), "WHITE_MODE must be a setting"
 assert "level_scale: white ? CAL.level : 1.0" not in _ui, "it used to be white-only"
 # a drag is one intent: the trailing edge sends, in-flight work coalesces
 assert "CAL_DEBOUNCE_MS" in _ui and "clearTimeout(CAL_TIMER)" in _ui

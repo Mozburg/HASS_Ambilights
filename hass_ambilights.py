@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.4"
+__version__ = "2.9.5"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1227,13 +1227,16 @@ async function reload() {
   setDirty(!!data.unsaved, false); // live values that the file doesn't have yet
 }
 
+// settings a Save may include: the hidden legacy aliases must never be written back
+const visibleNames = () => new Set(META.filter((m) => !m.hidden).map((m) => m.name));
+
 function applyLive() {
   clearTimeout(liveTimer);
   liveTimer = setTimeout(async () => {
     const seq = ++liveSeq;
     if (lightsTouched) CFG.LIGHT_MAP = serializeMap(LIGHTS);   // lights/zones are live too
     const settings = {};
-    const visible = new Set(META.filter((m) => !m.hidden).map((m) => m.name));
+    const visible = visibleNames();
     Object.keys(CFG).forEach((k) => {
       if (!NOT_LIVE.includes(k) && visible.has(k)) settings[k] = CFG[k];
     });
@@ -1274,7 +1277,7 @@ async function save() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ settings: Object.fromEntries(
-      Object.entries(CFG).filter(([k]) => visible.has(k))) }),
+        Object.entries(CFG).filter(([k]) => visibleNames().has(k))) }),
     });
     const data = await r.json();
     if (!data.ok) {

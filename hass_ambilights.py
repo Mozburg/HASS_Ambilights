@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.10.1"
+__version__ = "2.10.2"
 
 
 # ---------------------------------------------------------------- config ----
@@ -391,6 +391,9 @@ WN = (0.95047, 1.00000, 1.08883)
 D65_XY = (0.3127, 0.3290)
 CALIBRATION_FILE = "calibration.json"      # beside config.json, gitignored
 # what the calibration asks the user to look at, in the order it is shown
+# True primaries: the reference has to be the colour you are calibrating against, not a
+# pastel of it. A primary sits on the sRGB corner, so calibrate_xy rides the gamut
+# boundary to keep hue travel instead of shrinking the frame to make room.
 CALIBRATION_FRAMES = {
     "white": (255, 255, 255),
     "red": (255, 0, 0),
@@ -1457,7 +1460,8 @@ const CAL = {
   active: false, busy: false, mode: "quick",   // quick 4 -> refine 10 -> full 12
 };
 
-const CAL_FRAMES = { white: [255, 255, 255], red: [255, 0, 0], green: [0, 255, 0], blue: [0, 0, 255] };
+const CAL_FRAMES = { white: [255, 255, 255], red: [255, 0, 0],
+                     green: [0, 255, 0], blue: [0, 0, 255] };
 const CAL_LEVELS = { dark: 0.25, mid: 0.5, light: 0.82 };
 
 // quick  = white + R/G/B, one level each            -> 4 steps
@@ -1535,7 +1539,7 @@ async function calSend() {
   const body = {
     action: "apply", entity: CAL.entity, frame: step.frame, level: step.level,
     hue: white ? 0 : CAL.hue, chroma: white ? 1.0 : CAL.chroma,
-    warmth: white ? CAL.warmth : 0.0, level_scale: white ? CAL.level : 1.0,
+    warmth: white ? CAL.warmth : 0.0, level_scale: CAL.level,
   };
   let out;
   try {
@@ -1583,7 +1587,7 @@ function renderCalibration() {
                   + slider("cal-warmth", "Warmth \u2212 cool, + warm", -1, 1, CAL.warmth, 0.02)
                 : slider("cal-hue", "Hue", -45, 45, CAL.hue, 1)
                   + slider("cal-chroma", "Saturation", 0.4, 1.8, CAL.chroma, 0.01)
-                  + slider("cal-level", "Brightness", 0.5, 1.6, CAL.level, 0.01)}
+                  + slider("cal-level", "Brightness", 0.3, 2.5, CAL.level, 0.01)}
         <div class="actions" style="padding-top:10px">
           <button class="btn primary" id="cal-next" type="button">Looks right</button>
           <button class="btn" id="cal-skip" type="button">Skip</button>
@@ -2718,6 +2722,12 @@ def calibrate_xy(xy, hue_deg: float, chroma: float, warmth: float = 0.0):
     has to rotate the chromaticity, which is what this does in u'v'. A bulb that renders
     *white* too warm cannot be fixed by saturation either, because a neutral sits exactly
     on D65 and scaling a zero distance moves nothing - that is what warmth is for.
+
+    The correction is applied *fully* when the result is still a colour an sRGB
+    display can produce, and at the largest fraction of it that is when it is not.
+    Returning the original colour on overflow looks identical to a dead control:
+    a saturated red sits on the spectral edge, so every positive rotation leaves
+    the gamut and +5 looked exactly as broken as +45.
     """
     if not hue_deg and chroma == 1.0 and not warmth:
         return tuple(xy)
@@ -2731,8 +2741,26 @@ def calibrate_xy(xy, hue_deg: float, chroma: float, warmth: float = 0.0):
     if warmth:
         du += WARMTH_UV[0] * warmth
         dv += WARMTH_UV[1] * warmth
-    out = _uv_to_xy((base[0] + du, base[1] + dv))
-    return out if valid_xy(out) else tuple(xy)
+    target = (base[0] + du, base[1] + dv)
+    if valid_xy(target) and _in_srgb_gamut(target):
+        return _uv_to_xy(target)
+
+    # Out of gamut: keep the requested HUE and take the most colour that hue can hold.
+    # Walking back toward white would turn "a redder red" into pink; shortening the
+    # rotation would freeze a saturated primary, which has no room at all inside the
+    # chart and would read as a dead slider.
+    angle = math.atan2(dv, du)
+    low, high = 0.0, math.hypot(du, dv)
+    for _ in range(24):
+        mid = (low + high) / 2
+        candidate = _uv_to_xy((base[0] + mid * math.cos(angle),
+                               base[1] + mid * math.sin(angle)))
+        if valid_xy(candidate) and _in_srgb_gamut(candidate):
+            low = mid
+        else:
+            high = mid
+    edge = _uv_to_xy((base[0] + low * math.cos(angle), base[1] + low * math.sin(angle)))
+    return edge if (valid_xy(edge) and low > 0.004) else tuple(xy)
 
 
 def apply_calibration(colour: dict, cal: dict) -> dict:
@@ -2852,7 +2880,11 @@ def preview_colour(colour: dict) -> dict:
     if not valid_xy(xy):
         xy, k = (base if valid_xy(base) else D65_XY), 1.0
     brightness = brightness_for_colour(colour) if SEND_BRIGHTNESS else 255
-    rgb = render_rgb(xy, brightness / 255.0)
+    # The swatch shows the colour, not the dimming: rendering it at the sent level made
+    # a saturated red read #e00000 at brightness 40 and #ff0000 at 255, which looks like
+    # the wrong colour when it is the right colour at a lower level. Brightness is its own
+    # number next to the swatch, and that is the one that dims.
+    rgb = render_rgb(xy, 1.0)
     return {
         "xy": [round(xy[0], 4), round(xy[1], 4)],
         "brightness": brightness,
@@ -4187,8 +4219,12 @@ def post_calibration(payload: Any = Body(...)):
             hue = 0.0                      # white only gets brightness and warm/cool
             chroma = 1.0                   # scaling a neutral moves nothing; warmth does
         xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma, warmth)
+        # the slider multiplies the frame's own luminance, so 1.0 means "as measured"
+        frame_lum = float(np.dot(_srgb_to_linear(np.asarray(rgb, dtype=np.float32) / 255.0),
+                                 np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)))
         colour = {"rgb": rgb, "xy": [round(xy[0], 4), round(xy[1], 4)],
-                  "luminance": max(0.02, level_scale * 0.4), "calibration_level": 1.0}
+                  "luminance": max(0.02, min(1.0, level_scale * max(frame_lum, 0.05))),
+                  "calibration_level": 1.0}
         brightness = brightness_for_colour(colour)
         sent = _send_now(entity, colour["xy"], brightness)
         preview = preview_colour(colour)

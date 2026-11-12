@@ -8,6 +8,31 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.10.2] — 2026-11-12
+
+### Fixed
+- **The brightness slider did nothing on colour frames.** The send was hard-wired to
+  `level_scale: 1.0` unless the frame was white, so only the white step responded.
+  Verified in the UI: 89 → 121 brightness on the red step, and the slider's range widened
+  to 0.3–2.5.
+- **Positive hue did nothing on a saturated primary.** `calibrate_xy` rotated the
+  chromaticity and, when the result fell outside sRGB, returned the *original colour* —
+  so +5° looked exactly as dead as +45°. A primary sits on the gamut corner, so positive
+  rotation always overflowed. The correction now keeps the requested hue and takes the
+  most chroma that hue can hold (binary search to the gamut boundary), so the slider
+  travels properly in both directions: on red, +25° sends `#ff9300`, −25° sends `#ff008c`.
+- **The colour swatch rendered at the sent level**, so a fully saturated red read
+  `#e00000` at brightness 40 and `#ff0000` at 255 — the right colour at a lower level,
+  which looks like the wrong colour. The swatch now shows the colour and the brightness
+  is its own number, which is how it was always being sent (chromaticity + level, never
+  an RGB triple).
+
+### Changed
+- Calibration frames are true primaries (`#ff0000`, `#00ff00`, `#0000ff`), dimmed by the
+  level and nothing else — the reference has to be the colour you are calibrating against.
+  At a full primary the saturation slider has little headroom by definition, because the
+  gamut stops there; that is the gamut, not a broken control.
+
 ## [2.10.1] — 2026-11-12
 
 ### Fixed

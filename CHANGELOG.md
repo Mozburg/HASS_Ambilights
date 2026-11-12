@@ -8,6 +8,18 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.5] — 2026-11-12
+
+### Fixed
+- **Save was broken in 2.9.3 and 2.9.4: `visible is not defined`.** Building the save
+  payload from "only the settings the page shows" introduced a reference to `visible`,
+  which was declared inside `applyLive()` and not in `save()` — so every Save threw
+  before it sent anything. The set is now one `visibleNames()` helper used by both paths,
+  and the suite asserts that `save()` builds its payload from the helper and never reaches
+  for a local that belongs to another function.
+- The suite also checks the outcome, not just the request: the server must report
+  `persisted: true` and the value must come back in `saved_settings` with `unsaved: false`.
+
 ## [2.9.4] — 2026-11-11
 
 ### Changed

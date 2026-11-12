@@ -1406,6 +1406,27 @@ _ui = m.UI_HTML
 assert "captureFocus()" in _ui and "restoreFocus(focusBefore)" in _ui
 print("focus ok: a refresh puts the caret back")
 
+# --- a save must not touch an undeclared name ------------------------------
+_ui = m.UI_HTML
+# this shipped broken in 2.9.3/2.9.4: save() used `visible`, which only existed
+# inside applyLive(), so every Save threw "visible is not defined"
+assert "const visibleNames = () =>" in _ui, "one declaration for the visible-key set"
+assert _ui.count("visibleNames()") >= 2, "save and applyLive must both use it"
+_save_body = _ui.split("async function save()", 1)[1].split("async function ", 1)[0]
+assert "visibleNames().has(k)" in _save_body, "save() must build its payload from the helper"
+assert "visible.has(k)" not in _save_body, "save() must not reach for applyLive()'s local"
+print("save ok: the payload helper is declared once and used by both paths")
+
+# and the endpoint must actually persist what the UI sends
+_before = dict(m.settings_snapshot())
+_out = m.post_config({"settings": {"COLOUR_BLEND": 0.35}, "persist": True})
+assert _out["ok"] and _out["persisted"] is True, _out
+_saved = m.get_config()["saved_settings"]
+assert _saved["COLOUR_BLEND"] == 0.35, _saved["COLOUR_BLEND"]
+assert m.get_config()["unsaved"] is False, "a saved value must not look unsaved"
+m.apply_settings({"COLOUR_BLEND": _before["COLOUR_BLEND"]}, persist=True)
+print("save ok: the server persists the UI's payload and clears the unsaved flag")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False

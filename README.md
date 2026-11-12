@@ -151,6 +151,37 @@ has: `0` combines every monitor onto one canvas, `1` is the primary, `2+` are th
 each labelled with its resolution and position. Multi-monitor setups no longer have to
 guess which index is the screen they're looking at.
 
+## Calibrating to your own eyes
+
+The **Calibration** card does the job the old automatic check could not. That check
+compared the colour a light *reports* to the colour it was sent — useful for catching a
+bulb that lies, blind to a lampshade, a wall, or a warm-white LED. This one uses you as
+the sensor.
+
+Press **Calibrate…**, pick a light, and the app switches the others off, puts an exact
+reference patch on screen and sets that light to the same colour. Drag **hue**,
+**saturation** and **brightness** until the two match, then **Looks right**:
+
+| | |
+|---|---|
+| quick pass | white + red/green/blue, one level each — **4 frames**, about a minute |
+| refined | carries straight on with dark and light for each colour — **10 frames** |
+| full | adds dark and light for white too, so the level curve gets three points — **12 frames** |
+
+White only offers brightness and warm/cool: it is the frame that sets the level, and no
+hue control can fix a colour temperature. Whatever you accept is stored per light in
+`calibration.json` beside `config.json`, listed in the card with a **Clear** button, and
+applied to every frame that light is sent from then on.
+
+Two things will quietly ruin a calibration, so the panel says both: turn off Windows
+**Night Light** and **HDR** first (they tint the reference patch), and calibrate in the
+light you actually watch in. A calibration corrects a bulb that leans cyan or orange; it
+cannot correct a lampshade.
+
+`BRIGHTNESS_FROM`, `BRIGHTNESS_GAMMA` and `SATURATION_BOOST` sit under **Advanced** in the
+same card — they are the numeric half of the same job. `--calibrate` on the command line
+still runs the old twelve-colour accuracy sweep.
+
 ## The colour knobs
 
 | setting | what it does |
@@ -160,9 +191,10 @@ guess which index is the screen they're looking at.
 | `BRIGHTNESS_BLEND` | 0 = the zone's average luminance, 1 = the dominant cluster's own brightness |
 | `CHROMA_FLOOR` | how colourful a cell must be to vote at all — this is what makes white pages and grey UI stop washing the colour out (default du'v' 0.010) |
 | `HUE_BINS` | dominant mode's hue resolution: 24 = 15° buckets, and the winner is averaged with its two neighbours. Lower merges two similar hues into one steady colour; higher separates them but can flicker between neighbours (default 24) |
-| `SATURATION_BOOST` | off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
-| `BRIGHTNESS_FROM` | `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
-| `BRIGHTNESS_GAMMA` | tone curve on the brightness input |
+| `SEND_BRIGHTNESS` | off leaves the lamp's level alone; sits directly above the follow flag |
+| `SATURATION_BOOST` | (Calibration card) off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
+| `BRIGHTNESS_FROM` | (Calibration card) `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
+| `BRIGHTNESS_GAMMA` | (Calibration card) tone curve on the brightness input |
 | `SEND_MODE` | `xy` (default, precise) or legacy `rgb` |
 | `ZONE_ROWS`, `ZONE_COLS` | how many zones the screen is split into (default 3 × 3). Up to 8 × 8, so a wide desk can be 5 × 3 and a wall of spotlights 4 × 4. Zones are numbered in reading order; shrinking the grid is refused while a light's mapping still uses a zone that no longer exists |
 
@@ -205,6 +237,8 @@ the environment variable for that setting is ignored.
 | `GET /api/lights` | light entities from HA for the picker (30 s cache, `?refresh=1` to bypass) |
 | `GET /api/monitors` | monitors mss can capture, for the Monitor picker (0 = all combined) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
+| `GET /api/calibration` | every light's stored hue/chroma/level offsets, plus the frames and levels the panel uses |
+| `POST /api/calibration` | `start` (solo a light), `apply` (send one frame with live offsets), `commit`, `clear`, `end` (restore the others) |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
 | `GET /health` | `version` plus live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
 | `GET /regions` | the nine zone colours for the current frame |

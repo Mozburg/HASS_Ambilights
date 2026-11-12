@@ -1,5 +1,6 @@
 # local state
 config.json
+calibration.json
 secrets.json
 .venv/
 .venv*/

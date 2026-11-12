@@ -1366,7 +1366,8 @@ _ui_src = m.UI_HTML
 assert "if (!z.length) return" in _ui_src, "empty zones must not serialise as all"
 assert "visible.has(k)" in _ui_src, "hidden legacy keys must not be saved back"
 assert "setDirty(!!data.unsaved, false)" in _ui_src, "hydrating must not fire a live POST"
-assert "if (++misses > 5)" in _ui_src, "the calibrate poll must give up"
+assert "function openCalibration()" in _ui_src, "the manual panel replaces the old probe"
+assert "api/calibrate" not in _ui_src, "the automatic probe is no longer in the page"
 print("ui ok: no empty-zone inflation, no hidden-key saves, no POST on load")
 
 # --- wave four: the example config must not fall behind the code -----------
@@ -1405,6 +1406,127 @@ print("ssrf ok: public hosts refused, userinfo redacted and rejected")
 _ui = m.UI_HTML
 assert "captureFocus()" in _ui and "restoreFocus(focusBefore)" in _ui
 print("focus ok: a refresh puts the caret back")
+
+# --- manual calibration -----------------------------------------------------
+_cal_base = m.xy_from_rgb([255, 140, 40])
+assert m.calibrate_xy(_cal_base, 0, 1.0) == tuple(_cal_base), "identity must be exact"
+# a saturated orange rotated hard can leave the gamut, in which case the original is
+# kept - the contract is "always return something valid", not "always move"
+_rotated = m.calibrate_xy(m.xy_from_rgb([200, 120, 90]), 15, 1.0)
+assert m.valid_xy(_rotated) and _rotated != tuple(m.xy_from_rgb([200, 120, 90])), _rotated
+assert m._neo(_rotated, m.D65_XY) > 0.01, "rotation must keep the colour coloured"
+_extreme = m.calibrate_xy(_cal_base, 80, 1.0)
+assert m.valid_xy(_extreme), "an impossible rotation must fall back to something valid"
+_weak = m.calibrate_xy(m.xy_from_rgb([255, 0, 0]), 0, 0.6)
+_strong = m.calibrate_xy(m.xy_from_rgb([255, 0, 0]), 0, 1.4)
+assert m._neo(_weak, m.D65_XY) < m._neo(_strong, m.D65_XY), "chroma must scale"
+print("calibration ok: identity exact, hue rotates, chroma scales")
+
+_plain_colour = {"rgb": [200, 200, 200], "xy": list(m.xy_from_rgb([200, 200, 200])),
+                 "luminance": 0.5}
+assert m.brightness_for_colour(dict(_plain_colour)) == 205
+assert m.brightness_for_colour({**_plain_colour, "calibration_level": 0.6}) == 123
+_tuned = m.apply_calibration(dict(_plain_colour), {"hue": 10, "chroma": 0.9, "level": 0.7})
+assert _tuned["calibration_level"] == 0.7 and _tuned["xy"] != list(_plain_colour["xy"])
+print("calibration ok: level scales brightness without touching the hue")
+
+m.CALIBRATION.clear()
+m.CALIBRATION["light.cal"] = {"hue": 12.0, "chroma": 0.92, "level": 0.85}
+assert m.save_calibration(), "calibration must persist"
+_cal_file = m.calibration_path()
+assert _cal_file.exists()
+m.CALIBRATION.clear()
+m.load_calibration()
+assert m.CALIBRATION["light.cal"] == {"hue": 12.0, "chroma": 0.92, "level": 0.85}, m.CALIBRATION
+print("calibration ok: saved beside config.json and reloaded")
+
+# and turning a calibration into what gets sent
+m.CALIBRATION["light.left_lamp"] = {"hue": 20.0, "chroma": 0.8, "level": 0.7}
+_sent_colour = {"rgb": [252, 157, 0], "xy": list(m.xy_from_rgb([252, 157, 0])), "luminance": 0.37}
+m.apply_calibration(_sent_colour, m.calibration_for("light.left_lamp"))
+_pv = m.preview_colour(_sent_colour)
+assert _sent_colour["calibration_level"] == 0.7
+assert _pv["brightness"] < m.brightness_for_colour(
+    {"rgb": [252, 157, 0], "xy": list(m.xy_from_rgb([252, 157, 0])), "luminance": 0.37})
+m.CALIBRATION.clear()
+m.save_calibration()
+print("calibration ok: a stored calibration changes brightness and hue downstream")
+
+# the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
+import types as _types
+_calls = []
+_orig = (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post)
+m.check_ha = lambda *a, **k: True
+m._send_now = lambda entity, xy, br: (_calls.append(("send", entity, tuple(xy), br)), True)[1]
+m._autotune_attrs = lambda targets: [{"entity_id": t.entity_id, "rgb_color": [9, 9, 9],
+                                      "brightness": 77} for t in targets]
+m.restore_light = lambda state, attempts=3: (_calls.append(("restore", state["entity_id"])), True)[1]
+m.requests.post = lambda url, **k: (_calls.append(("off", k["json"]["entity_id"])),
+                                    _types.SimpleNamespace(ok=True, status_code=200))[1]
+try:
+    m.TARGETS = m.parse_light_map("light.a=1,2; light.b=3,4; light.c=5,6")
+    m.CALIBRATION.clear(); m.CALIBRATION_SESSION.clear()
+    _r = m.post_calibration({"action": "start", "entity": "light.a"})
+    assert _r["ok"] and _r["solo"] == "light.a" and _r["soloed"] == ["light.b", "light.c"], _r
+    assert m.TUNING.is_set(), "calibration must silence the pipeline"
+    assert [c for c in _calls if c[0] == "off"] == [("off", "light.b"), ("off", "light.c")], _calls
+    _calls.clear()
+
+    _r = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
+                             "level": "mid", "hue": 10, "chroma": 1.0, "level_scale": 1.0})
+    # the reference patch is the frame at its level, so mid red is half-strength
+    assert _r["ok"] and _r["sent"] and _r["reference"] == "#800000", _r
+    assert _r["xy"][0] > 0.6 and _r["brightness"] > 100, "mid red must be red and lit"
+    assert len([c for c in _calls if c[0] == "send"]) == 1, _calls
+
+    _bad = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "mauve"})
+    assert _bad.status_code == 400, "an unknown frame must be refused"
+
+    _r = m.post_calibration({"action": "commit", "entity": "light.a",
+                             "hue": 4, "chroma": 0.93, "level": 0.88})
+    assert _r["ok"] and _r["saved"] and m.CALIBRATION["light.a"]["hue"] == 4.0, _r
+
+    _r = m.post_calibration({"action": "clear", "entity": "light.a"})
+    assert _r["ok"] and "light.a" not in m.CALIBRATION, _r
+
+    _calls.clear()
+    _r = m.post_calibration({"action": "end"})
+    assert _r["ok"] and not m.TUNING.is_set(), "ending must let the pipeline run again"
+    assert sorted(c[1] for c in _calls if c[0] == "restore") == ["light.b", "light.c"], _calls
+
+    _dry = m.DRY_RUN; m.DRY_RUN = True
+    assert m.post_calibration({"action": "start", "entity": "light.a"}).status_code == 400
+    m.DRY_RUN = _dry
+    assert m.post_calibration({"action": "start", "entity": "sensor.x"}).status_code == 400
+    print("calibration ok: solo/apply/commit/clear/end all behave, bad input refused")
+finally:
+    (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
+    m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
+
+# the step planner itself, executed (node), not pattern-matched
+import json as _json
+import subprocess as _sp
+import pathlib as _pathlib
+import shutil as _shutil
+_js = _pathlib.Path(__file__).parent / "check_calsteps.js"
+if _shutil.which("node"):
+    _out = _sp.run(["node", str(_js), str(_pathlib.Path(m.__file__))],
+                   capture_output=True, text=True, timeout=30)
+    assert _out.returncode == 0, _out.stdout + _out.stderr
+    _plan = _json.loads(_out.stdout)
+    assert _plan["counts"] == {"quick": 4, "refine": 10, "full": 12}, _plan
+    print("calibration ok: 4 quick -> 10 refined -> 12 full, both ends named")
+else:
+    assert 'mode === "quick" ? ["mid"]' in m.UI_HTML, "quick pass is one level"
+    print("calibration ok: node missing, checked statically instead")
+
+# the panel exists and the button opens it, not the old automatic probe
+_ui = m.UI_HTML
+assert "function renderCalibration()" in _ui and "openCalibration" in _ui
+assert "btn.onclick = openCalibration" in _ui, "the card's button opens the panel"
+assert "Turn off Windows Night Light and HDR" in _ui, "the panel must warn about the display"
+assert "cal-hue" in _ui and "cal-chroma" in _ui and "cal-level" in _ui
+print("calibration ok: panel wired, warns about Night Light, three controls")
 
 # --- a save must not touch an undeclared name ------------------------------
 _ui = m.UI_HTML

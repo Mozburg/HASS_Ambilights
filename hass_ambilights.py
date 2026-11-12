@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.5"
+__version__ = "2.10.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -389,6 +389,15 @@ log = logging.getLogger("spotlight-sync")
 # D65 reference white
 WN = (0.95047, 1.00000, 1.08883)
 D65_XY = (0.3127, 0.3290)
+CALIBRATION_FILE = "calibration.json"      # beside config.json, gitignored
+# what the calibration asks the user to look at, in the order it is shown
+CALIBRATION_FRAMES = {
+    "white": (255, 255, 255),
+    "red": (255, 0, 0),
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+}
+CALIBRATION_LEVELS = {"dark": 0.25, "mid": 0.5, "light": 0.82}   # of full scale
 
 # --------------------------------------------------------------- targets ----
 class Target:
@@ -640,6 +649,10 @@ UI_HTML = r"""<!DOCTYPE html>
   small.mono{font-family:ui-monospace,monospace;color:var(--muted)}
   .ends{display:flex;justify-content:space-between;gap:8px;font-size:11px;
     color:var(--muted-foreground);margin-top:2px}
+  .calresults{margin-bottom:12px}
+  .calrow{display:flex;gap:10px;align-items:center;justify-content:space-between;
+    padding:6px 0;border-bottom:1px solid var(--line);font-size:12px}
+  .calrow .calvalues{color:var(--muted);margin-left:auto;margin-right:8px}
   .ends .here{color:var(--foreground);font-variant-numeric:tabular-nums}
   .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
     clip:rect(0 0 0 0);white-space:nowrap;border:0}
@@ -678,7 +691,6 @@ UI_HTML = r"""<!DOCTYPE html>
     <div class="actions">
       <button class="btn primary" id="save" type="button">Save &amp; apply</button>
       <button class="btn" id="revert" type="button">Revert</button>
-      <button class="btn" id="calibrate" type="button">Calibrate…</button>
       <button class="btn danger" id="reset" type="button">Reset to defaults</button>
       <small class="mono" id="version"></small>
       <small class="mono" id="cfgpath"></small>
@@ -710,6 +722,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
+let CAL_CURRENT = {};           // per-light calibration offsets, for the results list
 let lightsTouched = false;      // the mapping is only rewritten when edited here
 let ZONE_ROWS = 3, ZONE_COLS = 3, ZONE_COUNT = 9;
 let META = [], CFG = {}, LIGHTS = [], dirty = false, lastPosts = null, lastPostT = null, rate = 0;
@@ -1026,6 +1039,60 @@ function control(meta, value) {
   return wrap;
 }
 
+function calibrationResults() {
+  const wrap = document.createElement("div");
+  wrap.className = "calresults";
+  const rows = Object.entries(CAL_CURRENT || {});
+  const head = document.createElement("div");
+  head.className = "label";
+  head.textContent = rows.length
+    ? `Current calibration (${rows.length} light${rows.length === 1 ? "" : "s"})`
+    : "No lights calibrated yet";
+  wrap.appendChild(head);
+  const help = document.createElement("div");
+  help.className = "help";
+  help.textContent = rows.length
+    ? "These offsets are applied to everything those lights are sent."
+    : "Calibrate… walks you through matching each light to a reference patch on screen.";
+  wrap.appendChild(help);
+  rows.sort(([a], [b]) => a.localeCompare(b)).forEach(([entity, cal]) => {
+    const row = document.createElement("div");
+    row.className = "calrow mono";
+    const name = document.createElement("span");
+    name.textContent = CSS.escape ? entity : entity;
+    const values = document.createElement("span");
+    values.className = "calvalues";
+    values.textContent = `hue ${(+cal.hue).toFixed(0)}° · sat ${(+cal.chroma).toFixed(2)}`
+      + ` · level ${(+cal.level).toFixed(2)}`;
+    const clear = document.createElement("button");
+    clear.type = "button"; clear.className = "btn"; clear.textContent = "Clear";
+    clear.title = `Stop correcting ${entity}`;
+    clear.onclick = async () => {
+      await fetch("/api/calibration", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear", entity }),
+      });
+      await reload();
+    };
+    row.append(name, values, clear);
+    wrap.appendChild(row);
+  });
+  if (rows.length) {
+    const clearAll = document.createElement("button");
+    clearAll.type = "button"; clearAll.className = "btn"; clearAll.textContent = "Clear all";
+    clearAll.style.marginTop = "8px";
+    clearAll.onclick = async () => {
+      await fetch("/api/calibration", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear" }),
+      });
+      await reload();
+    };
+    wrap.appendChild(clearAll);
+  }
+  return wrap;
+}
+
 function settingRow(m) {
   const row = document.createElement("div");
   row.className = "row" + (m.restart ? " restart-required" : "");
@@ -1106,6 +1173,24 @@ function renderSettings() {
     const body = document.createElement("div");
     body.className = "body";
     items.filter((m) => !m.advanced).forEach((m) => body.appendChild(settingRow(m)));
+    if (group === "Calibration") {
+      // the button belongs with the results it produces, not in the footer
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      actions.style.padding = "0 0 10px";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "btn primary"; btn.id = "calibrate";
+      btn.textContent = "Calibrate…";
+      btn.title = "Match each light to reference patches shown on screen";
+      btn.onclick = openCalibration;
+      const note = document.createElement("span");
+      note.className = "mono";
+      note.style.fontSize = "12px";
+      note.textContent = "one light at a time · others are switched off meanwhile";
+      actions.append(btn, note);
+      body.appendChild(actions);
+      body.appendChild(calibrationResults());
+    }
     if (group === "Sending") {                 // the tuning button belongs at the top
       const tune = document.createElement("div");
       tune.className = "actions";
@@ -1205,6 +1290,10 @@ async function reload() {
   }
   LASTCONFIG = data;
   $("loaderror").innerHTML = "";
+  try {                                   // what each light is currently compensated by
+    CAL_CURRENT = await fetch("/api/calibration", { cache: "no-store" })
+      .then((r) => r.json()).then((d) => d.lights || {});
+  } catch (e) { CAL_CURRENT = {}; }
   META = data.meta;
   CFG = data.settings;
   if (Array.isArray(data.zone_grid)) {
@@ -1358,51 +1447,205 @@ async function watchRestart(port) {
                 : "It did not come back on its own — start HASS Ambilights again", true);
 }
 
-async function calibrate() {
-  const entity = (LIGHTS.find((l) => l.entity.trim()) || {}).entity
-    || (LASTCONFIG && LASTCONFIG.lights[0] && LASTCONFIG.lights[0].entity) || "the light";
-  if (!confirm(`Measure colour accuracy on ${entity}?\n\nIt will flash twelve test colours `
-    + "for about seven seconds, then restore the light's previous state.")) return;
-  $("calibrate").disabled = true;
-  try {
-    const r = await fetch("/api/calibrate", { method: "POST" });
-    const data = await r.json();
-    if (!data.ok) { toast("Calibration: " + data.error, true); $("calibrate").disabled = false; return; }
-    toast(`Calibrating ${data.entity}…`);
-    const started = Date.now();
-    let misses = 0;
-    const poll = setInterval(async () => {
-      const h = await fetch("/health").then((x) => x.json()).catch(() => null);
-      if (!h) {
-        // the app restarts itself on save, so a few misses are normal; never
-        // leave the button disabled and the interval running for the page's life
-        if (++misses > 5) {
-          clearInterval(poll);
-          $("calibrate").disabled = false;
-          toast("Lost contact while calibrating", true);
-        }
-        return;
-      }
-      misses = 0;
-      if (h.stats && h.stats.calibrating) {
-        if (Date.now() - started > 30000) { clearInterval(poll); $("calibrate").disabled = false; }
-        return;
-      }
-      clearInterval(poll);
-      $("calibrate").disabled = false;
-      const rep = (h.stats || {}).calibration;
-      if (!rep) { toast("Calibration finished without a report", true); return; }
-      if (rep.error) { toast("Calibration failed: " + rep.error, true); return; }
-      if (rep.dry_run) { toast("Dry run: payloads logged, nothing sent"); return; }
-      toast(`Calibration: worst du'v' ${rep.worst_duv} (dE76 ${rep.worst_de}) over `
-        + `${rep.samples.length} colours · light ${rep.restored ? "restored" : "NOT restored"}`,
-        !rep.restored);
-    }, 1000);
-  } catch (e) {
-    toast("Calibration request failed: " + e.message, true);
-    $("calibrate").disabled = false;
+
+/* ---------------------------------------------------------- calibration -- */
+// Semi-manual, per light: the screen shows an exact reference patch, the lamp is
+// set to the same colour and soloed, and the user nudges hue / chroma / level
+// until the two look alike. The offsets are what the payload applies afterwards.
+const CAL = {
+  entity: null, steps: [], index: 0, hue: 0, chroma: 1.0, level: 1.0,
+  active: false, busy: false, mode: "quick",   // quick 4 -> refine 10 -> full 12
+};
+
+const CAL_FRAMES = { white: [255, 255, 255], red: [255, 0, 0], green: [0, 255, 0], blue: [0, 0, 255] };
+const CAL_LEVELS = { dark: 0.25, mid: 0.5, light: 0.82 };
+
+// quick  = white + R/G/B, one level each            -> 4 steps
+// refine = the same plus dark and light for R/G/B    -> 10 steps (automatic)
+// full   = dark, mid and light for white and R/G/B   -> 12 steps
+function calSteps(mode) {
+  const levels = mode === "quick" ? ["mid"] : ["dark", "mid", "light"];
+  const out = [];
+  if (mode === "full") levels.forEach((level) => out.push({ frame: "white", level }));
+  else out.push({ frame: "white", level: "mid" });
+  ["red", "green", "blue"].forEach((frame) => {
+    levels.forEach((level) => out.push({ frame, level }));
+  });
+  return out;
+}
+
+function calReference(step) {
+  const rgb = CAL_FRAMES[step.frame].map((c) => Math.round(c * (CAL_LEVELS[step.level] || 0.5)));
+  return "#" + rgb.map((c) => c.toString(16).padStart(2, "0")).join("");
+}
+
+async function calCall(payload) {
+  const r = await fetch("/api/calibration", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return r.json();
+}
+
+async function openCalibration() {
+  const entity = (LIGHTS.find((l) => l.entity.trim()) || {}).entity;
+  if (!entity) { toast("Pick a light first", true); return; }
+  CAL.entity = entity.trim();
+  CAL.steps = calSteps(CAL.mode);
+  CAL.index = 0; CAL.hue = 0; CAL.chroma = 1.0; CAL.level = 1.0;
+  const started = await calCall({ action: "start", entity: CAL.entity });
+  if (!started.ok) { toast("Calibration: " + started.error, true); return; }
+  CAL.active = true;
+  renderCalibration();
+}
+
+async function closeCalibration() {
+  CAL.active = false;
+  const done = await calCall({ action: "end" });
+  await reload();
+  toast(`Calibration finished${done.restored ? ` · ${done.restored} light(s) restored` : ""}`);
+}
+
+function calStepLabel() {
+  const step = CAL.steps[CAL.index];
+  return `${step.frame} · ${step.level}`;
+}
+
+async function calApply() {
+  const step = CAL.steps[CAL.index];
+  const white = step.frame === "white";
+  const body = {
+    action: "apply", entity: CAL.entity, frame: step.frame, level: step.level,
+    hue: white ? 0 : CAL.hue, chroma: CAL.chroma, level_scale: white ? CAL.level : 1.0,
+  };
+  const out = await calCall(body);
+  const sent = document.getElementById("cal-sent");
+  if (sent) {
+    sent.textContent = out.ok
+      ? `sent ${out.adjusted} · brightness ${out.brightness}`
+      : "send failed: " + (out.error || "unknown");
   }
 }
+
+function renderCalibration() {
+  const step = CAL.steps[CAL.index];
+  const white = step.frame === "white";
+  const host = $("settings");
+  const slider = (id, label, min, max, value, stepSize) => `
+    <div class="row"><div><div class="label">${label}</div></div>
+      <div class="ctl"><input type="range" id="${id}" min="${min}" max="${max}"
+        step="${stepSize}" value="${value}"><input type="number" id="${id}-n"
+        min="${min}" max="${max}" step="${stepSize}" value="${value}"></div></div>`;
+  host.innerHTML = `
+    <div class="card" id="calibration">
+      <h2>Calibrate ${esc(CAL.entity)}</h2>
+      <div class="body">
+        <div class="banner" style="border-color:rgba(210,153,34,.5);background:rgba(210,153,34,.08);color:#e3b341">
+          Turn off Windows Night Light and HDR first, and judge with the room lit the way
+          you normally use it — otherwise you are matching to a distorted reference.
+          Other lights are switched off while you work; they come back when you finish.
+        </div>
+        <div style="display:flex;gap:16px;align-items:center;margin:12px 0">
+          <div style="flex:0 0 120px;height:120px;border-radius:10px;border:1px solid var(--line);
+               background:${calReference(step)}" aria-label="reference colour"></div>
+          <div>
+            <div class="mono" style="font-size:12px;color:var(--muted)">step ${CAL.index + 1} of ${CAL.steps.length}</div>
+            <div style="font-size:16px;margin:2px 0 6px">${calStepLabel()} — make the lamp match this patch</div>
+            <div class="mono" id="cal-sent" style="font-size:12px;color:var(--muted)">not sent yet</div>
+          </div>
+        </div>
+        ${white ? slider("cal-level", "Brightness", 0.3, 1.6, CAL.level, 0.01)
+                : slider("cal-hue", "Hue", -45, 45, CAL.hue, 1)
+                  + slider("cal-chroma", "Saturation", 0.4, 1.8, CAL.chroma, 0.01)
+                  + slider("cal-level", "Brightness", 0.5, 1.6, CAL.level, 0.01)}
+        ${white ? slider("cal-chroma", "Warm / cool", 0.5, 1.5, CAL.chroma, 0.01) : ""}
+        <div class="actions" style="padding-top:10px">
+          <button class="btn primary" id="cal-next" type="button">Looks right</button>
+          <button class="btn" id="cal-skip" type="button">Skip</button>
+          <button class="btn" id="cal-back" type="button">Back</button>
+          <button class="btn" id="cal-full" type="button">${CAL.mode === "full" ? "Quick pass (4)" : "Full calibration (12)"}</button>
+          <button class="btn" id="cal-end" type="button">Finish</button>
+          <span class="mono" id="cal-status" style="font-size:12px"></span>
+        </div>
+      </div>
+    </div>`;
+
+  const wire = (id, key) => {
+    const range = $(id), num = $(`${id}-n`);
+    if (!range) return;
+    const set = (v) => {
+      const n = Math.min(+range.max, Math.max(+range.min, +v));
+      CAL[key] = n; range.value = n; if (num) num.value = n; calApply();
+    };
+    range.oninput = () => set(range.value);
+    if (num) num.onchange = () => set(num.value);
+  };
+  wire("cal-hue", "hue");
+  wire("cal-chroma", "chroma");
+  wire("cal-level", "level");
+
+  $("cal-next").onclick = async () => {
+    const body = {
+      action: "commit", entity: CAL.entity,
+      hue: white ? 0 : CAL.hue, chroma: CAL.chroma, level: CAL.level,
+    };
+    const out = await calCall(body);
+    if (!out.ok) { toast("Could not save: " + out.error, true); return; }
+    advance();
+  };
+  $("cal-skip").onclick = advance;
+  $("cal-back").onclick = () => {
+    if (CAL.index > 0) { CAL.index -= 1; renderCalibration(); calApply(); }
+  };
+  $("cal-full").onclick = () => {
+    CAL.mode = CAL.mode === "full" ? "quick" : "full";
+    CAL.steps = calSteps(CAL.mode);
+    CAL.index = Math.min(CAL.index, CAL.steps.length - 1);
+    renderCalibration();
+  };
+  $("cal-end").onclick = closeCalibration;
+  CAL.busy = false;
+  calApply();
+}
+
+function advance() {
+  if (CAL.index + 1 >= CAL.steps.length) {
+    if (CAL.mode === "quick") {          // 4 done: keep going automatically
+      const done = CAL.steps.length;
+      CAL.mode = "refine";
+      CAL.steps = calSteps("refine");
+      CAL.index = done;                  // first step the quick pass did not cover
+      toast("Quick pass done — refining with dark and light frames (6 more)");
+      renderCalibration();
+      return;
+    }
+    closeCalibration();
+    return;
+  }
+  CAL.index += 1;
+  renderCalibration();
+}
+
+/* ----------------------------------------------------------------- wiring -- */
+// Bind defensively: a missing element used to throw here and kill the whole
+// script before the first render, leaving a blank page instead of a hint.
+function on(id, event, handler) {
+  const el = $(id);
+  if (el) el.addEventListener(event, handler);
+  else console.error(`UI element #${id} is missing - not binding ${event}`);
+  return el;
+}
+on("save", "click", save);
+on("revert", "click", revertToSaved);
+on("reset", "click", resetDefaults);
+on("addlight", "click", addLight);
+on("refreshlights", "click", async () => {
+  await loadEntities(true);
+  renderLights();
+  toast((ENTITIES.ok ? `${ENTITIES.count} light(s) loaded` : "Could not load lights: " + ENTITIES.detail),
+        !ENTITIES.ok);
+});
+
 
 /* ------------------------------------------------------------------ live -- */
 function hexFromXy(x, y) {
@@ -1573,26 +1816,6 @@ async function tick() {
   }
 }
 
-/* ----------------------------------------------------------------- wiring -- */
-// Bind defensively: a missing element used to throw here and kill the whole
-// script before the first render, leaving a blank page instead of a hint.
-function on(id, event, handler) {
-  const el = $(id);
-  if (el) el.addEventListener(event, handler);
-  else console.error(`UI element #${id} is missing - not binding ${event}`);
-  return el;
-}
-on("save", "click", save);
-on("revert", "click", revertToSaved);
-on("reset", "click", resetDefaults);
-on("calibrate", "click", calibrate);
-on("addlight", "click", addLight);
-on("refreshlights", "click", async () => {
-  await loadEntities(true);
-  renderLights();
-  toast((ENTITIES.ok ? `${ENTITIES.count} light(s) loaded` : "Could not load lights: " + ENTITIES.detail),
-        !ENTITIES.ok);
-});
 async function autotuneNow() {
   const status = $("autotunestatus");
   const howMany = LIGHTS.filter((l) => l.entity.trim()).length || 1;
@@ -1688,6 +1911,8 @@ SETTINGS = [
           "0 = the region's average colour, 1 = its most prominent coloured cluster, "
           "and anything between is a blend. 0.5 is the default.",
           min=0.0, max=1.0, step=0.05, scale=1.0, ends=("mean", "dominant")),
+    _spec("SEND_BRIGHTNESS", "bool", True, "Colour", "Send brightness",
+          "Turn brightness updates off to leave the lamp's level alone."),
     _spec("BRIGHTNESS_FOLLOW_COLOUR", "bool", True, "Colour", "Brightness follows colour",
           "On: brightness blends the same way the colour does. Off: set it separately."),
     _spec("BRIGHTNESS_BLEND", "float", 0.5, "Colour", "Brightness blend",
@@ -1712,9 +1937,9 @@ SETTINGS = [
           "neighbours). Lower merges similar hues; higher separates them but can "
           "flicker.",
           min=6, max=72, advanced=True, show_if={"COLOUR_BLEND": {"$gt": 0.001}}),
-    _spec("SATURATION_BOOST", "bool", False, "Colour", "Saturation boost",
+    _spec("SATURATION_BOOST", "bool", False, "Calibration", "Saturation boost",
           "Push chroma away from white as the frame gets brighter. Off sends the "
-          "measured colour untouched."),
+          "measured colour untouched.", advanced=True),
     _spec("SATURATION_GAIN", "float", 0.8, "Colour", "Boost strength",
           "k = 1 + gain * luminance^curve, capped at max. Only used when boost is on.",
           min=0.0, max=2.0, step=0.05, advanced=True, show_if={"SATURATION_BOOST": True}),
@@ -1725,14 +1950,12 @@ SETTINGS = [
     _spec("SEND_MODE", "enum", "xy", "Colour", "Payload colour space",
           "xy = chromaticity (precise, recommended). rgb = legacy rgb_color.",
           values=["xy", "rgb"], advanced=True),
-    _spec("SEND_BRIGHTNESS", "bool", True, "Brightness", "Send brightness",
-          "Turn brightness updates off to leave the lamp's level alone."),
-    _spec("BRIGHTNESS_FROM", "enum", "lstar", "Brightness", "Brightness source",
+    _spec("BRIGHTNESS_FROM", "enum", "lstar", "Calibration", "Brightness source",
           "luminance = physical light, lstar = perceptual CIELAB, value = brightest channel "
-          "(hue has no effect).", values=["luminance", "lstar", "value"]),
-    _spec("BRIGHTNESS_GAMMA", "float", 0.8, "Brightness", "Brightness gamma",
+          "(hue has no effect).", values=["luminance", "lstar", "value"], advanced=True),
+    _spec("BRIGHTNESS_GAMMA", "float", 0.8, "Calibration", "Brightness gamma",
           "Tone curve on the 0-1 input: <1 lifts dim frames, >1 crushes them.",
-          min=0.3, max=2.5, step=0.05),
+          min=0.3, max=2.5, step=0.05, advanced=True),
 
     _spec("ZONE_ROWS", "int", 3, "Capture", "Zone rows",
           "How many rows the screen is split into. Changing this re-splits every "
@@ -2455,6 +2678,42 @@ def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> 
     return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
 
 
+def calibrate_xy(xy, hue_deg: float, chroma: float):
+    """Rotate the hue and scale the chroma around D65, leaving the hue's own level.
+
+    A bulb that renders blue as cyan cannot be fixed with saturation alone: the
+    correction has to rotate the chromaticity, which is what this does in u'v'.
+    """
+    if not hue_deg and chroma == 1.0:
+        return tuple(xy)
+    base = _xy_to_uv(D65_XY)
+    u, v = _xy_to_uv(xy)
+    du, dv = u - base[0], v - base[1]
+    if hue_deg:
+        angle = math.radians(hue_deg)
+        du, dv = du * math.cos(angle) - dv * math.sin(angle), du * math.sin(angle) + dv * math.cos(angle)
+    du, dv = du * chroma, dv * chroma
+    out = _uv_to_xy((base[0] + du, base[1] + dv))
+    return out if valid_xy(out) else tuple(xy)
+
+
+def apply_calibration(colour: dict, cal: dict) -> dict:
+    """Apply one light's calibration to its colour, in place."""
+    if not cal:
+        return colour
+    colour["xy"] = [round(v, 4) for v in calibrate_xy(
+        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)))]
+    colour["calibration_level"] = float(cal.get("level", 1.0))
+    colour["rgb"] = srgb_from_xy(tuple(colour["xy"]), max(colour.get("luminance", 0.0), 1e-4))
+    if "dominant" in colour:
+        colour["dominant"] = colour["xy"]
+    return colour
+
+
+def calibration_for(entity: str) -> dict | None:
+    return CALIBRATION.get(entity)
+
+
 def brightness_for_luminance(lum: float) -> int:
     """Relative luminance 0..1 -> 1-255 brightness (0 = off in HA, so floor at 1)."""
     return int(round(max(1.0, min(255.0, 255.0 * max(0.0, lum) ** BRIGHTNESS_GAMMA))))
@@ -2477,7 +2736,11 @@ def brightness_channel(colour: dict) -> float:
 
 
 def brightness_for_colour(colour: dict) -> int:
-    return brightness_for_luminance(brightness_channel(colour))
+    level = brightness_for_luminance(brightness_channel(colour))
+    scale = float(colour.get("calibration_level", 1.0))
+    if scale != 1.0:
+        level = int(round(max(1.0, min(255.0, level * scale))))
+    return level
 
 
 def should_send(target: Target, colour: dict, brightness: int) -> bool:
@@ -3478,6 +3741,9 @@ def capture_loop() -> None:
                 if "dominant" in colour:
                     colour["xy"] = colour["dominant"]
                     colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
+                cal = calibration_for(target.entity_id)
+                if cal:
+                    apply_calibration(colour, cal)
                 # outside the branch: with the colour at mean and the brightness
                 # blend at 1 there is no "dominant" key, and the level was dropped
                 colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
@@ -3761,6 +4027,165 @@ def fetch_areas() -> dict[str, str]:
         if entity.startswith("light.") and area:
             areas[entity] = area
     return areas
+
+
+CALIBRATION: dict = {}
+
+
+def calibration_path() -> Path:
+    return CONFIG_PATH.parent / CALIBRATION_FILE
+
+
+def load_calibration() -> None:
+    path = calibration_path()
+    CALIBRATION.clear()
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.error("ignoring %s: %s", path, exc)
+        return
+    for entity, entry in (data or {}).items():
+        if isinstance(entry, dict) and entity.startswith("light."):
+            CALIBRATION[entity] = {
+                "hue": float(entry.get("hue", 0.0) or 0.0),
+                "chroma": float(entry.get("chroma", 1.0) or 1.0),
+                "level": float(entry.get("level", 1.0) or 1.0),
+            }
+
+
+def save_calibration() -> bool:
+    path = calibration_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(CALIBRATION, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+        return True
+    except OSError as exc:
+        log.error("could not write %s: %s", path, exc)
+        return False
+
+
+CALIBRATION_SESSION: dict = {}          # what to put back when the user finishes
+
+
+def _frame_colour(frame: str, level: str) -> list[int]:
+    rgb = CALIBRATION_FRAMES[frame]
+    scale = CALIBRATION_LEVELS.get(level, 0.5)
+    return [int(round(channel * scale)) for channel in rgb]
+
+
+def _send_now(entity: str, xy, brightness: int) -> bool:
+    body = {"entity_id": entity, "xy_color": [round(xy[0], 4), round(xy[1], 4)]}
+    if SEND_BRIGHTNESS:
+        body["brightness"] = brightness
+    body["transition"] = 0
+    try:
+        response = _post(body, timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        log.warning("calibration send to %s failed: %s", entity, exc)
+        return False
+    return response.ok
+
+
+@app.get("/api/calibration")
+def get_calibration():
+    return {"ok": True, "lights": CALIBRATION,
+            "frames": {name: list(rgb) for name, rgb in CALIBRATION_FRAMES.items()},
+            "levels": CALIBRATION_LEVELS}
+
+
+@app.post("/api/calibration")
+def post_calibration(payload: Any = Body(...)):
+    """start | apply | commit | clear | end — one endpoint, explicit actions."""
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "payload must be an object"}, status_code=400)
+    action = str(payload.get("action") or "")
+    entity = str(payload.get("entity") or "")
+
+    if action == "start":
+        if not entity.startswith("light."):
+            return JSONResponse({"ok": False, "error": "entity must be a light"}, status_code=400)
+        if DRY_RUN:
+            return JSONResponse({"ok": False, "error": "dry run is on"}, status_code=400)
+        if not check_ha():
+            return JSONResponse({"ok": False, "error": "Home Assistant is unreachable"},
+                                status_code=400)
+        # silence the pipeline and remember what the other lights were showing
+        TUNING.set()
+        CALIBRATION_SESSION.clear()
+        for target in TARGETS:
+            if target.entity_id == entity:
+                continue
+            CALIBRATION_SESSION[target.entity_id] = _autotune_attrs([target])[0]
+            try:
+                requests.post(f"{HA_URL}/api/services/light/turn_off",
+                              headers=auth_headers(),
+                              json={"entity_id": target.entity_id}, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as exc:
+                # keep going: a light that will not switch off is worth reporting,
+                # not worth abandoning the session over
+                log.warning("could not switch %s off for calibration: %s",
+                            target.entity_id, exc)
+                stats.setdefault("calibration_errors", 0)
+                stats["calibration_errors"] += 1
+        return {"ok": True, "solo": entity, "soloed": sorted(CALIBRATION_SESSION),
+                "frames": sorted(CALIBRATION_FRAMES), "levels": CALIBRATION_LEVELS}
+
+    if action == "apply":
+        frame = str(payload.get("frame") or "white")
+        level = str(payload.get("level") or "mid")
+        if frame not in CALIBRATION_FRAMES:
+            return JSONResponse({"ok": False, "error": f"unknown frame {frame}"}, status_code=400)
+        rgb = _frame_colour(frame, level)
+        hue = float(payload.get("hue") or 0.0)
+        chroma = float(payload.get("chroma") or 1.0)
+        level_scale = float(payload.get("level_scale") or 1.0)
+        if frame == "white":
+            hue = 0.0                      # white only gets warm/cool, which is chroma
+        xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma)
+        colour = {"rgb": rgb, "xy": [round(xy[0], 4), round(xy[1], 4)],
+                  "luminance": max(0.02, level_scale * 0.4), "calibration_level": 1.0}
+        brightness = brightness_for_colour(colour)
+        sent = _send_now(entity, colour["xy"], brightness)
+        preview = preview_colour(colour)
+        return {"ok": True, "sent": sent, "reference": "#%02x%02x%02x" % tuple(rgb),
+                "xy": colour["xy"], "brightness": brightness,
+                "adjusted": preview["hex"], "saturation_k": preview["saturation_k"]}
+
+    if action == "commit":
+        hue = float(payload.get("hue") or 0.0)
+        chroma = float(payload.get("chroma") or 1.0)
+        level_scale = float(payload.get("level") or 1.0)
+        if not entity.startswith("light."):
+            return JSONResponse({"ok": False, "error": "entity must be a light"}, status_code=400)
+        CALIBRATION[entity] = {"hue": round(hue, 1), "chroma": round(chroma, 3),
+                               "level": round(level_scale, 3)}
+        saved = save_calibration()
+        return {"ok": True, "saved": saved, "lights": CALIBRATION}
+
+    if action == "clear":
+        if entity:
+            CALIBRATION.pop(entity, None)
+        else:
+            CALIBRATION.clear()
+        return {"ok": True, "saved": save_calibration(), "lights": CALIBRATION}
+
+    if action == "end":
+        TUNING.clear()
+        restored, failed = 0, []
+        for other, state in list(CALIBRATION_SESSION.items()):
+            if restore_light(state, attempts=3):
+                restored += 1
+            else:
+                failed.append(other)
+        CALIBRATION_SESSION.clear()
+        if failed:
+            log.warning("calibration could not restore %s", ", ".join(failed))
+        return {"ok": True, "restored": restored, "failed": failed}
+
+    return JSONResponse({"ok": False, "error": f"unknown action {action!r}"}, status_code=400)
 
 
 @app.get("/api/lights")
@@ -4421,6 +4846,7 @@ def _run() -> None:
 
     load_secrets()
     load_config_file()                   # BIND_* may come from config.json
+    load_calibration()
     splash_text("starting the settings server")
 
     host = "127.0.0.1" if BIND_HOST in ("0.0.0.0", "::") else BIND_HOST

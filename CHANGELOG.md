@@ -8,6 +8,41 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.10.0] — 2026-11-12
+
+### Added
+- **Manual calibration: you are the sensor.** The Calibrate button now opens a panel
+  instead of running a sweep. It takes one light at a time, switches the others off,
+  shows an exact reference patch on screen and sets that light to the same colour, then
+  gives you **hue**, **saturation** and **brightness** sliders until the two match. What
+  you accept is stored per light in `calibration.json` and applied to every frame that
+  light is sent afterwards.
+- **4 → 10 → 12 frames.** A quick pass is white plus red/green/blue at one level (4). If
+  you keep going it refines itself with dark and light for each colour (10). **Full
+  calibration (12)** also gives white three levels, which is what pins down the level
+  curve. White only offers brightness and warm/cool — no hue control fixes a colour
+  temperature.
+- **A Calibration card.** The button, the current offsets per light with a **Clear** on
+  each, and `SATURATION_BOOST`, `BRIGHTNESS_FROM`, `BRIGHTNESS_GAMMA` under **Advanced** —
+  the numeric half of the same job, in one place.
+- `GET`/`POST /api/calibration` (`start`, `apply`, `commit`, `clear`, `end`).
+
+### Changed
+- **`SEND_BRIGHTNESS` moved into the Colour card, directly above "Brightness follows
+  colour"** — the thing it gates. The old Brightness card had nothing left and is gone.
+- `SATURATION_BOOST`, `BRIGHTNESS_FROM` and `BRIGHTNESS_GAMMA` are now listed under the
+  Calibration card rather than Colour and Brightness.
+
+### Fixed
+- Lights that could not be switched off during a calibration session no longer abort it;
+  they are logged and counted, and restore still runs for the rest.
+- Removed the dead automatic-probe UI path now that the panel replaces it.
+
+### Upgrading
+Take this if you were on 2.9.3 or 2.9.4 for the save fix alone, but the feature here is
+the manual calibration. Existing setups need no action: no calibration is stored until
+you run one, and `--calibrate` behaves exactly as before.
+
 ## [2.9.5] — 2026-11-12
 
 ### Fixed

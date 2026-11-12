@@ -1437,7 +1437,8 @@ _cal_file = m.calibration_path()
 assert _cal_file.exists()
 m.CALIBRATION.clear()
 m.load_calibration()
-assert m.CALIBRATION["light.cal"] == {"hue": 12.0, "chroma": 0.92, "level": 0.85}, m.CALIBRATION
+assert m.CALIBRATION["light.cal"] == {"hue": 12.0, "chroma": 0.92, "level": 0.85,
+                                    "warmth": 0.0}, m.CALIBRATION
 print("calibration ok: saved beside config.json and reloaded")
 
 # and turning a calibration into what gets sent
@@ -1451,6 +1452,33 @@ assert _pv["brightness"] < m.brightness_for_colour(
 m.CALIBRATION.clear()
 m.save_calibration()
 print("calibration ok: a stored calibration changes brightness and hue downstream")
+
+# warmth: white sat on D65, so chroma scaling moved it nowhere. This is that bug.
+_white = m.xy_from_rgb([255, 255, 255])
+# (compare distance, not tuples: xy -> u'v' -> xy is not bit-exact)
+assert m._neo(m.calibrate_xy(_white, 0, 1.4), _white) < 1e-4, "chroma alone must not move white"
+_warm = m.calibrate_xy(_white, 0, 1.0, 0.8)
+_cool = m.calibrate_xy(_white, 0, 1.0, -0.8)
+assert m.valid_xy(_warm) and m.valid_xy(_cool)
+assert _warm != tuple(_white) and _cool != tuple(_white), "warmth must move a neutral"
+assert _warm[0] > _white[0] and _cool[0] < _white[0], "positive is warmer, negative cooler"
+assert m._neo(_warm, _white) > 0.01 and m._neo(_warm, _white) < 0.06, "a full slider is a visible nudge"
+assert m.calibrate_xy(_white, 0, 1.0, 0.0) == tuple(_white), "zero warmth is still identity"
+assert m._neo(m.calibrate_xy(_white, 0, 1.0, 1.0), _white) > m._neo(
+    m.calibrate_xy(_white, 0, 1.0, 0.5), _white), "the slider must be monotonic"
+print("calibration ok: warmth moves white along the locus, chroma cannot")
+
+# ... and a stored warmth survives the file and reaches the payload
+m.CALIBRATION.clear()
+m.CALIBRATION["light.warm"] = {"hue": 0.0, "chroma": 1.0, "level": 1.0, "warmth": 0.7}
+assert m.save_calibration()
+m.CALIBRATION.clear(); m.load_calibration()
+assert m.CALIBRATION["light.warm"]["warmth"] == 0.7, m.CALIBRATION
+_applied = m.apply_calibration({"rgb": [255, 255, 255], "xy": list(_white), "luminance": 0.6},
+                              m.calibration_for("light.warm"))
+assert _applied["xy"][0] > _white[0], "a stored warmth must reach what is sent"
+m.CALIBRATION.clear(); m.save_calibration()
+print("calibration ok: warmth round-trips through calibration.json into the payload")
 
 # the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
 import types as _types
@@ -1526,6 +1554,13 @@ assert "function renderCalibration()" in _ui and "openCalibration" in _ui
 assert "btn.onclick = openCalibration" in _ui, "the card's button opens the panel"
 assert "Turn off Windows Night Light and HDR" in _ui, "the panel must warn about the display"
 assert "cal-hue" in _ui and "cal-chroma" in _ui and "cal-level" in _ui
+# white gets brightness + warmth, never a chroma slider that cannot move it
+assert 'slider("cal-warmth"' in _ui and 'wire("cal-warmth", "warmth")' in _ui
+assert "chroma: white ? 1.0 : CAL.chroma" in _ui
+# a drag is one intent: the trailing edge sends, in-flight work coalesces
+assert "CAL_DEBOUNCE_MS" in _ui and "clearTimeout(CAL_TIMER)" in _ui
+assert "if (CAL_INFLIGHT) { CAL_PENDING = true; return; }" in _ui
+assert "calApply(true)" in _ui, "a step change must send at once, not after the debounce"
 print("calibration ok: panel wired, warns about Night Light, three controls")
 
 # --- a save must not touch an undeclared name ------------------------------

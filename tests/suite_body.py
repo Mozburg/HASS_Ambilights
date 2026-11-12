@@ -1244,27 +1244,42 @@ print("restart: re-execs the exe when frozen, the script when not")
 
 # saving a restart-only setting restarts, and says so before it goes
 m.stats["restarting"] = False
+# a monitor change is applied in place now: restarting it was the bug (the new process
+# came up on a different port with no config)
+_epoch = m.MONITOR_EPOCH
 _saved = m.post_config({"MONITOR_INDEX": 2})
-assert _saved["restart_required"] == ["MONITOR_INDEX"], _saved
-assert _saved["restarting"] is True, _saved
-time.sleep(1.2)                                   # the timer fires
+assert _saved["restart_required"] == [], _saved
+assert _saved["restarting"] is False, _saved
+assert m.MONITOR_EPOCH > _epoch, "capture must be told to re-pick the monitor"
+assert not _fired, "a monitor change must not re-exec the program"
+m.post_config({"MONITOR_INDEX": 1})
+print("restart: a monitor change applies in place and never re-execs")
+
+# and the restart machinery itself still works when something really needs it,
+# including the guard that stops a broken setting looping forever
+_fired.clear()
+_guard = m._restart_guard_path()
+_guard.unlink(missing_ok=True)
+assert m.restart_self("test") is True, "restart_self must fire on a clean guard"
+time.sleep(1.2)
 assert _fired, "os.execv was never called"
 assert _fired[0][0] == _fired[0][1][0]
-assert m.health()["restarting"] is True
-print("restart: a saved restart-only setting re-execs the process")
+_guard.write_text(str(time.time()), encoding="utf-8")
+assert m.restart_self("test again") is False, "a second restart within 30s must be refused"
+_guard.unlink(missing_ok=True)
+print("restart: fires when it must, refuses to loop")
 
-# ...but not twice inside the guard window: that would be a crash loop
-m.stats["restarting"] = False
-_again = m.post_config({"MONITOR_INDEX": 1})
-assert _again["restart_required"] == ["MONITOR_INDEX"], _again
-assert _again["restarting"] is False, "a second restart inside 30 s must be refused"
+# a second restart inside the guard window is refused: that would be a crash loop
+_guard.write_text(str(time.time()), encoding="utf-8")
+assert m.restart_self("too soon") is False, "a second restart inside 30 s must be refused"
+_guard.unlink(missing_ok=True)
 print("restart: a second restart within 30 s is refused (no crash loop)")
 
 # live application is not a save, so it must not restart anything
 _fired.clear()
 m.stats["restarting"] = False
 _live = m.post_config({"MONITOR_INDEX": 0, "persist": False})
-assert _live["restart_required"] == ["MONITOR_INDEX"], _live
+assert _live["restart_required"] == [], _live
 assert _live["restarting"] is False, "a live apply must not restart the app"
 time.sleep(1.0)
 assert not _fired, _fired
@@ -1407,6 +1422,49 @@ _ui = m.UI_HTML
 assert "captureFocus()" in _ui and "restoreFocus(focusBefore)" in _ui
 print("focus ok: a refresh puts the caret back")
 
+# --- upgrades must not lose a user's settings -------------------------------
+import json as _json
+import pathlib as _pathlib2
+import tempfile as _tempfile
+
+_mig_dir = _pathlib2.Path(_tempfile.mkdtemp())
+_mig_cfg = _mig_dir / "config.json"
+_mig_cfg.write_text(_json.dumps({
+    "COLOR_ALGO": "dominant", "DOMINANT_MIX": 0.7, "DOMINANT_LUMINANCE": "region",
+    "LIGHT_MAP": "light.x=1,2", "CAPTURE_FPS": 15,
+    "A_FUTURE_KEY": {"nested": [1, 2]},   # written by a newer build, or by hand
+}), encoding="utf-8")
+_saved_path = m.CONFIG_PATH
+m.CONFIG_PATH = _mig_cfg
+try:
+    m.load_config_file(_mig_cfg)
+    assert m.COLOUR_BLEND == 0.7, f"DOMINANT_MIX must become COLOUR_BLEND: {m.COLOUR_BLEND}"
+    assert m.BRIGHTNESS_BLEND == 0.0, f"region must become BRIGHTNESS_BLEND 0: {m.BRIGHTNESS_BLEND}"
+    assert m.CONFIG_EXTRAS.get("A_FUTURE_KEY") == {"nested": [1, 2]}, m.CONFIG_EXTRAS
+    assert m.persist_config(_mig_cfg), "the migrated config must be writable"
+    _after = _json.loads(_mig_cfg.read_text(encoding="utf-8"))
+    assert _after["COLOUR_BLEND"] == 0.7 and _after["BRIGHTNESS_BLEND"] == 0.0, _after
+    assert _after["WHITE_MODE"] == "auto", "a new setting must appear with its default"
+    assert _after["A_FUTURE_KEY"] == {"nested": [1, 2]}, "unknown keys must survive a save"
+    assert _after["LIGHT_MAP"] == "light.x=1,2" and _after["CAPTURE_FPS"] == 15
+    assert not {"COLOR_ALGO", "DOMINANT_MIX", "DOMINANT_LUMINANCE"} & set(_after), (
+        "translated keys must retire, or the file carries both schemas for ever")
+    print("migration ok: old keys translated and retired, new defaults added, "
+          "unknown keys preserved")
+finally:
+    m.CONFIG_PATH = _saved_path
+    m.CONFIG_EXTRAS.clear()
+
+# a monitor change is applied in place: restarting it is what lost the port and the config
+_mon_spec = m.SETTINGS_BY_NAME["MONITOR_INDEX"]
+assert not _mon_spec.get("restart"), "MONITOR_INDEX must not force a restart"
+_epoch = m.MONITOR_EPOCH
+m.apply_settings({"MONITOR_INDEX": 2}, persist=False)
+assert m.MONITOR_EPOCH > _epoch, "capture must be told to re-pick the monitor"
+assert m.MONITOR_INDEX == 2, m.MONITOR_INDEX
+m.apply_settings({"MONITOR_INDEX": 1}, persist=False)
+print("monitor ok: changing it bumps the epoch capture watches, with no restart")
+
 # --- manual calibration -----------------------------------------------------
 _cal_base = m.xy_from_rgb([255, 140, 40])
 assert m.calibrate_xy(_cal_base, 0, 1.0) == tuple(_cal_base), "identity must be exact"
@@ -1529,6 +1587,7 @@ print("cct ok: warm and cool whites qualify, colour and green-tinted frames do n
 
 m.LIGHT_CAPS["light.white"] = {"cct": True, "min_k": 2000.0, "max_k": 9009.0,
                                "modes": ["color_temp", "xy"]}
+assert m.LIGHT_CAPS["light.white"]["cct"], "a full range must be usable"
 m.LIGHT_CAPS["light.plain"] = {"cct": False, "min_k": 2000.0, "max_k": 6500.0,
                                "modes": ["xy"]}
 _white = {"xy": list(m.xy_from_rgb([250, 250, 245])), "luminance": 0.5}
@@ -1577,12 +1636,82 @@ print("cct ok: warmth moves white and leaves colour alone")
 m.WHITE_MODE = "auto"; m.WHITE_STATE.clear()
 m.LIGHT_CAPS.pop("light.white", None); m.LIGHT_CAPS.pop("light.plain", None)
 
+# the kelvin range must come from the installation, never from a guess
+m.LIGHT_CAPS.clear()
+m.refresh_light_caps([
+    {"entity_id": "light.full", "attributes": {
+        "supported_color_modes": ["color_temp", "xy"],
+        "min_color_temp_kelvin": 2200, "max_color_temp_kelvin": 4000}},
+    {"entity_id": "light.mireds", "attributes": {
+        "supported_color_modes": ["color_temp", "xy"], "min_mireds": 250, "max_mireds": 454}},
+    {"entity_id": "light.norange", "attributes": {
+        "supported_color_modes": ["color_temp", "xy"]}},
+    {"entity_id": "light.rgbonly", "attributes": {"supported_color_modes": ["rgb"]}},
+])
+assert m.LIGHT_CAPS["light.full"]["cct"] and m.LIGHT_CAPS["light.full"]["min_k"] == 2200, (
+    m.LIGHT_CAPS["light.full"])
+assert m.LIGHT_CAPS["light.full"]["max_k"] == 4000, m.LIGHT_CAPS["light.full"]
+# mireds are the legacy spelling of the same thing: 1e6/454 ~= 2203K
+assert m.LIGHT_CAPS["light.mireds"]["cct"], m.LIGHT_CAPS["light.mireds"]
+assert 2200 < m.LIGHT_CAPS["light.mireds"]["min_k"] < 2210, m.LIGHT_CAPS["light.mireds"]
+assert not m.LIGHT_CAPS["light.norange"]["cct"], (
+    "a light that advertises color_temp but no range must not be guessed at")
+assert not m.LIGHT_CAPS["light.rgbonly"]["cct"]
+print("white ok: ranges come from the light, mireds understood, no range means no guessing")
+
+# and the clamp uses the reported range
+m.WHITE_STATE.clear()
+# a warm white the bulb can actually reach (~3300K); a 6300K white would be out of its
+# 2200-4000K range and correctly stays on xy
+_white = {"xy": list(m.xy_from_rgb([255, 196, 145])), "luminance": 0.5}
+_boost = m.SATURATION_BOOST
+m.SATURATION_BOOST = False        # a boosted white is legitimately no longer neutral
+try:
+    _bodies = [m.build_payload(dict(_white, white=True), "light.full", now=500 + i * 0.3)
+               for i in range(5)]
+finally:
+    m.SATURATION_BOOST = _boost
+_k = _bodies[-1].get("color_temp_kelvin")
+assert _k is not None and 2200 <= _k <= 4000, f"a 2200-4000K bulb was sent {_k}"
+print(f"white ok: clamped into the bulb's own 2200-4000K range ({_k}K)")
+m.WHITE_STATE.clear()
+m.LIGHT_CAPS.clear()
+
+# calibrating white must exercise the channel the pipeline uses
+# wide range on purpose: the warmth shift has to be visible, not clamped away
+m.LIGHT_CAPS["light.cal"] = {"cct": True, "min_k": 1500.0, "max_k": 12000.0, "modes": []}
+_orig_send = m._send_now
+_seen = {}
+m._send_now = lambda entity, xy, brightness, kelvin=None: (_seen.update(kelvin=kelvin), True)[1]
+try:
+    _res = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "white",
+                               "level": "mid", "warmth": 0.6, "level_scale": 1.0})
+finally:
+    m._send_now = _orig_send
+assert _res["mode"] == "color_temp", _res
+assert _seen["kelvin"] is not None and 1500 <= _seen["kelvin"] <= 12000, _seen
+assert _res["kelvin"] == int(round(_seen["kelvin"])), (_res, _seen)  # response is rounded
+# ... and warmth has to move that kelvin, which is the whole point of calibrating white
+_seen.clear()
+m._send_now = lambda entity, xy, brightness, kelvin=None: (_seen.update(kelvin=kelvin), True)[1]
+try:
+    _cool = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "white",
+                                "level": "mid", "warmth": -0.6, "level_scale": 1.0})
+finally:
+    m._send_now = _orig_send
+assert _seen["kelvin"] > _res["kelvin"], (
+    f"cooler must raise the kelvin: {_seen['kelvin']} vs {_res['kelvin']}")
+print("white ok: the white calibration step sends color_temp_kelvin, warmth moves it")
+
+m.LIGHT_CAPS.pop("light.cal", None)
+
 # the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
 import types as _types
 _calls = []
 _orig = (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post)
 m.check_ha = lambda *a, **k: True
-m._send_now = lambda entity, xy, br: (_calls.append(("send", entity, tuple(xy), br)), True)[1]
+m._send_now = lambda entity, xy, br, kelvin=None: (
+    _calls.append(("send", entity, tuple(xy), br)), True)[1]
 m._autotune_attrs = lambda targets: [{"entity_id": t.entity_id, "rgb_color": [9, 9, 9],
                                       "brightness": 77} for t in targets]
 m.restore_light = lambda state, attempts=3: (_calls.append(("restore", state["entity_id"])), True)[1]

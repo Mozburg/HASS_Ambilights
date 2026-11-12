@@ -8,14 +8,38 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.11.1] — 2026-11-12
+
+### Fixed
+- **Changing the monitor restarted the program instead of switching to it.** The re-exec
+  came up on its default port with none of the saved configuration, still watching the
+  previous screen. `MONITOR_INDEX` now applies in place: the capture loop notices the
+  change on its next frame, re-resolves the monitor and rebuilds the geometry.
+- **Saving could delete a user's settings.** The file was written from the keys this build
+  knows, so anything else — a key from an older release, or one written by a newer one —
+  disappeared on the first save. Unrecognised keys are now preserved verbatim, and
+  translated legacy keys are announced in the log and retired on the next save so a config
+  converges on the current schema instead of carrying both indefinitely.
+- **Kelvin ranges were guessed at.** A light that reported `color_temp` without a range was
+  treated as 2000-6500K, so it could be asked for whites it cannot make. The range now comes
+  from the light (`min/max_color_temp_kelvin`, with legacy mireds understood); without one,
+  the light stays on `xy`.
+- **The calibration white step sent `xy` while the pipeline sent kelvin**, so the white you
+  tuned was not the white that ran. It now sends through the same channel and reports the
+  kelvin it used.
+- **`warmth` moved in opposite directions on its two paths**: warmer on `xy`, cooler on the
+  kelvin channel. It now means warmer on both.
+
+### Changed
+- `MONITOR_INDEX` no longer requires a restart, and the settings page says so.
+
 ## [2.11.0] — 2026-11-12
 
 ### Added
 - **Neutral frames go out as `color_temp_kelvin`.** A bulb's white is usually a dedicated
   warm/cool LED pair; asking for white in `xy` often engages RGB mixing, which is dimmer and
-  less accurate. Coloured frames stay on `xy`. Measured on a white screen: settled at
-  **6380 K** on the kelvin channel, where the same frame had been going out as
-  `xy_color`.
+  less accurate. Coloured frames stay on `xy`, and a frame that used to go out as
+  `xy_color` now goes out as `color_temp_kelvin`, clamped to the range the light reports.
 - **`WHITE_MODE`** (`auto` | `color_temp` | `xy`, default `auto`) in Advanced → Sending.
 - `GET /api/lights` reports `white_channel` and the kelvin range per light; `/health`
   counts `cct_posts`.

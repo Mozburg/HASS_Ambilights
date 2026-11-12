@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.11.0"
+__version__ = "2.11.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -263,6 +263,7 @@ MAX_TRANSITION = float(_env("MAX_TRANSITION", "0.9"))
 # (so the per-cell mean is honest) and that thirds land on real boundaries.
 GRID_SIZE = (64, 36)                              # (width, height)
 MONITOR_INDEX = int(_env("MONITOR_INDEX", "1"))   # mss: 0 = all, 1 = primary
+MONITOR_EPOCH = 0        # bumped when MONITOR_INDEX changes: capture re-picks in place
 
 # Capture cost at 4K is dominated by converting the BGRA frame to RGB. Instead of
 # mss's `shot.rgb` (a 24 MB strided copy, ~44 ms/frame measured) the buffer is
@@ -1555,7 +1556,8 @@ async function calSend() {
   const sent = document.getElementById("cal-sent");
   if (sent) {
     sent.textContent = out.ok
-      ? `sent ${out.adjusted} · brightness ${out.brightness}`
+      ? `sent ${out.mode === "color_temp" ? out.kelvin + "K" : out.adjusted}`
+        + ` · brightness ${out.brightness}`
       : "send failed: " + (out.error || "unknown");
   }
 }
@@ -1957,13 +1959,13 @@ SETTINGS = [
     # accepted from old config files and scripts; folded into the two sliders above
     _spec("COLOR_ALGO", "enum", "dominant", "Colour", "Colour model (legacy)",
           "Deprecated: set Colour model instead.", values=["mean", "dominant"],
-          hidden=True, advanced=True),
+          hidden=True, advanced=True, legacy=True),
     _spec("DOMINANT_MIX", "float", 0.5, "Colour", "Dominant mix (legacy)",
           "Deprecated: set Colour model instead.", min=0.0, max=1.0, step=0.05, hidden=True,
-          advanced=True),
+          advanced=True, legacy=True),
     _spec("DOMINANT_LUMINANCE", "enum", "cluster", "Colour", "Dominant brightness (legacy)",
           "Deprecated: set Brightness blend instead.", values=["cluster", "region"],
-          hidden=True, advanced=True),
+          hidden=True, advanced=True, legacy=True),
     _spec("CHROMA_FLOOR", "float", 0.010, "Colour", "Neutral threshold",
           "du'v' below this counts as neutral when picking the dominant colour.",
           min=0.001, max=0.05, step=0.001, advanced=True, show_if={"COLOUR_BLEND": {"$gt": 0.001}}),
@@ -2012,8 +2014,8 @@ SETTINGS = [
           "Identical frames before dropping to the idle rate.", min=0, max=60, advanced=True),
     _spec("MONITOR_INDEX", "int", 1, "Capture", "Monitor",
           "Which screen to follow: 0 combines every monitor onto one canvas, 1 is "
-          "the primary, 2+ are the others in the order mss reports them. Needs a restart.",
-          min=0, max=8, restart=True, monitors=True),
+          "the primary, 2+ are the others in the order mss reports them. Applies at once.",
+          min=0, max=8, monitors=True),
 
     _spec("TRANSITION", "string", "auto", "Sending", "Transition",
           "'auto' matches the ramp to the achieved post interval; a number (seconds) "
@@ -2245,15 +2247,24 @@ def load_secrets() -> None:
         log.info("loaded the Home Assistant token from %s", SECRETS_PATH)
 
 
+# Keys in the user's file that this build does not know. They are carried through every
+# save rather than deleted: a downgrade, a config edited ahead of the code, or a key from an
+# extension must not lose data. Nothing reads them; they are written back untouched.
+CONFIG_EXTRAS: dict = {}
+
+
 def persist_config(path: Path | None = None) -> bool:
     path = path or CONFIG_PATH
     snapshot = settings_snapshot()
     PERSISTED.clear()
     PERSISTED.update(snapshot)
     data = {name: value for name, value in snapshot.items()
-            if SETTINGS_BY_NAME.get(name, {}).get("type") != "secret"}
+            if SETTINGS_BY_NAME.get(name, {}).get("type") != "secret"
+            and not SETTINGS_BY_NAME.get(name, {}).get("legacy")}   # migrated, not kept
+    for name in sorted(CONFIG_EXTRAS):    # theirs last, so ours still reads first
+        data.setdefault(name, CONFIG_EXTRAS[name])
     try:
-        path.write_text(json.dumps(data, indent=2) + "\n")
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         return True
     except OSError as exc:
         log.warning("could not write %s: %s", path, exc)
@@ -2383,6 +2394,13 @@ def _apply_settings_locked(payload: dict, persist: bool = True) -> tuple[dict, l
         AUTOSTART_RESULT.clear()
         AUTOSTART_RESULT.update({"ok": ok, "detail": message})
         log.info("autostart: %s", message)
+    if "MONITOR_INDEX" in new:
+        # capture notices this on its next frame and re-picks, without a restart: the
+        # restart path dropped the port and the config for anyone who did not start the
+        # program with the same flags it re-execs with
+        globals()["MONITOR_EPOCH"] = MONITOR_EPOCH + 1
+        log.info("monitor changed to %s; capture switches on the next frame",
+                 new["MONITOR_INDEX"])
     if {"ZONE_ROWS", "ZONE_COLS"} & set(new):
         rebuild_zone_index()
         if isinstance(LIGHT_MAP, str) and LIGHT_MAP:
@@ -2419,11 +2437,27 @@ def load_config_file(path: Path | None = None) -> None:
         log.error("ignoring %s: the top level must be an object", path)
         CONFIG_LOADED = True
         return
-    unknown = sorted(set(data) - set(SETTINGS_BY_NAME))
-    if unknown:
-        # one typo used to discard every other setting in the file
-        log.warning("ignoring unknown key(s) in %s: %s", path, ", ".join(unknown))
+    legacy = sorted(set(data) & {"COLOR_ALGO", "DOMINANT_MIX", "DOMINANT_LUMINANCE"})
     known = {k: v for k, v in data.items() if k in SETTINGS_BY_NAME}
+    if legacy:
+        # the translation has always happened in memory; say so once, and let the next save
+        # write the new keys and retire the old ones so the file stops carrying both
+        migrated = _translate_legacy_colour(dict(data))
+        gained = {k: migrated[k] for k in ("COLOUR_BLEND", "BRIGHTNESS_BLEND")
+                  if k in migrated and k not in known}
+        known.update(gained)
+        log.info("%s: migrated %s -> %s%s", path.name,
+                 ", ".join(f"{k}={data[k]}" for k in legacy),
+                 ", ".join(f"{k}={v}" for k, v in gained.items()) or "the current sliders",
+                 " (retired on the next save)")
+    unknown = sorted(set(data) - set(SETTINGS_BY_NAME) - set(legacy))
+    if unknown:
+        # one typo used to discard every other setting in the file; keeping them also
+        # means a config written by a newer build survives a downgrade
+        CONFIG_EXTRAS.clear()
+        CONFIG_EXTRAS.update({k: data[k] for k in unknown})
+        log.warning("keeping %d unrecognised key(s) in %s: %s",
+                    len(unknown), path.name, ", ".join(unknown))
     applied, errors = apply_settings(known, persist=False)
     if errors:
         log.error("config problems in %s: %s", path, "; ".join(errors))
@@ -2855,7 +2889,7 @@ def plan_white_mode(entity: str, colour: dict, now: float) -> tuple[bool, float]
     caps = LIGHT_CAPS.get(entity or "", {})
     state = WHITE_STATE.setdefault(entity or "", {"cct": False, "since": now, "run": 0})
     kelvin, duv = cct_from_xy(tuple(colour.get("xy") or D65_XY))
-    in_range = caps.get("min_k", 2000) <= kelvin <= caps.get("max_k", 6500)
+    in_range = bool(caps.get("cct")) and caps["min_k"] <= kelvin <= caps["max_k"]
 
     if WHITE_MODE == "xy" or not caps.get("cct") or SEND_MODE == "rgb":
         state.update(cct=False, run=0)
@@ -3031,7 +3065,9 @@ def build_payload(colour: dict, entity: str = "", now: float | None = None) -> d
     stats["saturation_k"] = preview["saturation_k"]
     if colour.get("white_mode"):
         use_cct = colour["white_mode"] == "color_temp"
-        kelvin = float(colour.get("kelvin") or 6500.0)
+        kelvin = colour.get("kelvin")
+        if kelvin is None:                   # nothing measured: ask the chromaticity
+            kelvin = cct_from_xy(xy)[0]
     else:                                   # direct callers (calibration, tests)
         use_cct, kelvin = plan_white_mode(
             entity, {"xy": xy, "luminance": colour.get("luminance")},
@@ -3040,9 +3076,12 @@ def build_payload(colour: dict, entity: str = "", now: float | None = None) -> d
         # the bulb's own white LEDs: warmer/cooler exactly, and no RGB mixing
         warmth = float(colour.get("warmth") or 0.0)
         if warmth:
-            kelvin *= 1.0 + WARMTH_KELVIN * warmth
+            kelvin *= 1.0 - WARMTH_KELVIN * warmth      # + is warmer, i.e. lower kelvin
         caps = LIGHT_CAPS.get(entity or "", {})
-        kelvin = max(caps.get("min_k", 2000), min(caps.get("max_k", 6500), kelvin))
+        if not caps.get("cct"):              # range vanished under us: xy can do it
+            use_cct = False
+        else:
+            kelvin = max(caps["min_k"], min(caps["max_k"], kelvin))
         payload["color_temp_kelvin"] = int(round(kelvin))
         stats["cct_posts"] = stats.get("cct_posts", 0) + 1
     elif SEND_MODE == "rgb":
@@ -3885,8 +3924,25 @@ def capture_loop() -> None:
     prev_grid = None
     identical = 0
     last_eval = 0.0
+    seen_epoch = MONITOR_EPOCH
 
     while not stop_event.is_set():
+        if MONITOR_EPOCH != seen_epoch:
+            # MONITOR_INDEX changed in the UI: re-resolve instead of restarting the
+            # program (a restart dropped the port and the config for anyone who did not
+            # start it with the same flags).
+            seen_epoch = MONITOR_EPOCH
+            try:
+                index, warning = pick_monitor(grabber.monitors, MONITOR_INDEX)
+                if warning:
+                    log.error(warning)
+                monitor = grabber.monitors[index]
+                seen_rev = -1                  # force the geometry to rebuild
+                stats["monitor_index"] = index
+                log.info("now capturing monitor %s (%sx%s)", index,
+                         monitor["width"], monitor["height"])
+            except Exception as exc:
+                log.error("could not switch to monitor %s: %s", MONITOR_INDEX, exc)
         started = time.perf_counter()
         interval = 1.0 / CAPTURE_FPS if CAPTURE_FPS > 0 else 0.5
         idle_interval = 1.0 / IDLE_FPS if IDLE_FPS > 0 else interval
@@ -4122,6 +4178,7 @@ async def lifespan(_app: FastAPI):
     if not PERSISTED:                          # no config.json yet: revert to boot values
         PERSISTED.update(settings_snapshot())
     TARGETS = parse_light_map(LIGHT_MAP if isinstance(LIGHT_MAP, str) else "")
+    stats["monitor_index"] = MONITOR_INDEX
     check_ha()
     refresh_light_caps()          # which lights have a white channel, and its range
     stop_event.clear()
@@ -4258,10 +4315,23 @@ def refresh_light_caps(states: list | None = None) -> int:
             continue
         attrs = state.get("attributes") or {}
         modes = [str(m) for m in (attrs.get("supported_color_modes") or [])]
+        # The range comes from the light, never from a guess: a 2200-4000K bulb told that
+        # it spans 2000-6500K would be asked for whites it cannot make. Legacy attributes
+        # are mireds (1e6 / K); if the light reports neither, it does not get the kelvin
+        # path at all and stays on xy, which every light supports.
+        min_k = attrs.get("min_color_temp_kelvin")
+        max_k = attrs.get("max_color_temp_kelvin")
+        if (min_k is None or max_k is None) and attrs.get("min_mireds") and attrs.get("max_mireds"):
+            # mireds run the other way round: min_mireds is the coolest (highest kelvin)
+            min_k = 1e6 / float(attrs["max_mireds"])
+            max_k = 1e6 / float(attrs["min_mireds"])
+        has_range = bool(min_k) and bool(max_k)
+        if "color_temp" in modes and not has_range:
+            log.debug("%s advertises color_temp but no kelvin range; staying on xy", entity)
         LIGHT_CAPS[entity] = {
-            "cct": "color_temp" in modes,
-            "min_k": float(attrs.get("min_color_temp_kelvin") or 2000),
-            "max_k": float(attrs.get("max_color_temp_kelvin") or 6500),
+            "cct": "color_temp" in modes and has_range,
+            "min_k": float(min_k) if has_range else 0.0,
+            "max_k": float(max_k) if has_range else 0.0,
             "modes": modes,
         }
         counted += 1
@@ -4338,8 +4408,12 @@ def _frame_colour(frame: str, level: str) -> list[int]:
     return [int(round(channel * scale)) for channel in rgb]
 
 
-def _send_now(entity: str, xy, brightness: int) -> bool:
-    body = {"entity_id": entity, "xy_color": [round(xy[0], 4), round(xy[1], 4)]}
+def _send_now(entity: str, xy, brightness: int, kelvin: float | None = None) -> bool:
+    body = {"entity_id": entity}
+    if kelvin is not None:
+        body["color_temp_kelvin"] = int(round(kelvin))
+    else:
+        body["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
     if SEND_BRIGHTNESS:
         body["brightness"] = brightness
     body["transition"] = 0
@@ -4416,10 +4490,22 @@ def post_calibration(payload: Any = Body(...)):
                   "luminance": max(0.02, min(1.0, level_scale * max(frame_lum, 0.05))),
                   "calibration_level": 1.0}
         brightness = brightness_for_colour(colour)
-        sent = _send_now(entity, colour["xy"], brightness)
+        # calibrating white has to tune the path the pipeline actually uses: the bulb's
+        # colour-temperature channel when it has one, xy otherwise. Otherwise the user
+        # matches one path and the program runs another.
+        kelvin = None
+        mode = "xy"
+        caps = LIGHT_CAPS.get(entity, {})
+        if frame == "white" and caps.get("cct") and WHITE_MODE != "xy":
+            kelvin, _ = cct_from_xy(tuple(colour["xy"]))
+            kelvin *= 1.0 - WARMTH_KELVIN * warmth
+            kelvin = max(caps["min_k"], min(caps["max_k"], kelvin))
+            mode = "color_temp"
+        sent = _send_now(entity, colour["xy"], brightness, kelvin)
         preview = preview_colour(colour)
         return {"ok": True, "sent": sent, "reference": "#%02x%02x%02x" % tuple(rgb),
-                "xy": colour["xy"], "brightness": brightness,
+                "xy": colour["xy"], "brightness": brightness, "mode": mode,
+                "kelvin": int(round(kelvin)) if kelvin else None,
                 "adjusted": preview["hex"], "saturation_k": preview["saturation_k"]}
 
     if action == "commit":

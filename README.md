@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.11.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.11.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -173,7 +173,9 @@ accurate than the white channel the bulb was built around. So neutral frames are
   only) or `xy` (never, the old behaviour).
 
 `GET /api/lights` reports `white_channel` per light, and `/health` counts `cct_posts` so
-you can see the split for yourself.
+you can see the split for yourself. Nothing here assumes a particular bulb: if a light
+reports `color_temp` and its kelvin bounds, it gets the kelvin path; if it reports neither,
+it stays on `xy`, which every light supports.
 
 ## Calibrating to your own eyes
 

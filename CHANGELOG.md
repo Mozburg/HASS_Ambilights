@@ -8,6 +8,24 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.3] — 2026-11-11
+
+### Security
+- **Test connection is no longer a LAN port scanner.** `/api/test-connection` fetched any
+  URL it was given, so with `BIND_HOST=0.0.0.0` anyone who could reach the settings page
+  could probe arbitrary hosts through it. It now refuses targets that do not resolve to a
+  private, loopback or link-local address — unless the host is the one already configured —
+  and only accepts `http(s)`.
+- **Credentials cannot ride in `HA_URL`.** A URL with `user:password@` is rejected on save,
+  and error text from `requests` (which echoes the whole URL) is redacted before it is
+  returned or logged.
+
+### Fixed
+- **A refresh no longer steals the caret.** Every settings refresh rebuilt the controls, so
+  a half-typed value lost focus and selection. Focus is captured by row and position and
+  restored afterwards — verified by focusing the pacing field, forcing a refresh, and
+  checking the same field still has it.
+
 ## [2.9.2] — 2026-11-11
 
 Wave four: the last of the audit's user-visible items.

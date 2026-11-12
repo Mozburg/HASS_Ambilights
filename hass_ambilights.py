@@ -172,6 +172,10 @@ else:
 
 
 import numpy as np
+import ipaddress
+import re
+import urllib.parse
+
 import requests
 import uvicorn
 from fastapi import Body, FastAPI
@@ -188,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.2"
+__version__ = "2.9.3"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1066,6 +1070,29 @@ function refreshVisibility() {
   });
 }
 
+// Controls are rebuilt on every refresh, so remember which field had focus by its
+// row and position rather than by element (the number twin has no id of its own).
+function captureFocus() {
+  const el = document.activeElement;
+  if (!el || !el.closest) return null;
+  const row = el.closest("#settings .row[data-setting]");
+  if (!row) return null;
+  const fields = [...row.querySelectorAll("input, select, textarea")];
+  const index = fields.indexOf(el);
+  if (index < 0) return null;
+  return { setting: row.dataset.setting, index, start: el.selectionStart, end: el.selectionEnd };
+}
+
+function restoreFocus(saved) {
+  if (!saved) return;
+  const row = document.querySelector(`#settings .row[data-setting="${saved.setting}"]`);
+  if (!row) return;
+  const el = [...row.querySelectorAll("input, select, textarea")][saved.index];
+  if (!el || typeof el.focus !== "function") return;
+  el.focus({ preventScroll: true });
+  try { if (saved.start != null) el.setSelectionRange(saved.start, saved.end); } catch (e) {}
+}
+
 function renderSettings() {
   const groups = {};
   META.filter((m) => m.name !== "LIGHT_MAP" && !m.hidden)
@@ -1164,6 +1191,7 @@ async function loadEntities(force) {
 }
 
 async function reload() {
+  const focusBefore = captureFocus();
   let data;
   try {
     const r = await fetch("/api/config");
@@ -1195,6 +1223,7 @@ async function reload() {
   renderSettings();
   renderLights();
   lightsTouched = false;          // rehydrated from the server: nothing edited here
+  restoreFocus(focusBefore);      // a refresh must not yank the caret out of a field
   setDirty(!!data.unsaved, false); // live values that the file doesn't have yet
 }
 
@@ -1796,6 +1825,11 @@ def bindable(host: str) -> bool:
     return False
 
 
+def redact_url(text: str) -> str:
+    """Drop user:password from anything we log or return."""
+    return re.sub(r"(https?://)[^/@\s]+@", r"\1", text)
+
+
 def host_for_url(host: str) -> str:
     """Bracket an IPv6 literal: http://::1:8000/ is not a URL."""
     return f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -2046,6 +2080,14 @@ def _apply_settings_locked(payload: dict, persist: bool = True) -> tuple[dict, l
             new.pop("BIND_HOST")
         else:
             new["BIND_HOST"] = host
+    if "HA_URL" in new:
+        try:
+            parts = urllib.parse.urlsplit(str(new["HA_URL"]))
+        except ValueError:
+            parts = None
+        if parts is not None and (parts.username or parts.password):
+            errors.append("HA_URL: put credentials in the token, not the URL")
+            new.pop("HA_URL")
     if "LIGHT_MAP" in new:
         try:
             parse_light_map(new["LIGHT_MAP"])
@@ -3799,6 +3841,43 @@ def get_config():
     }
 
 
+def _private_target(host: str) -> bool:
+    """Only LAN/loopback/link-local: this endpoint must not be a LAN port scanner."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        address = info[4][0]
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return False
+        if not (ip.is_private or ip.is_loopback or ip.is_link_local):
+            return False
+    return bool(infos)
+
+
+def _probe_allowed(url: str) -> tuple[bool, str]:
+    """Allowed if it points inside the network, or at the configured HA host."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False, "not a URL"
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False, "only http(s) URLs with a host"
+    try:
+        configured = urllib.parse.urlsplit(HA_URL).hostname
+    except ValueError:
+        configured = None
+    if parts.hostname == configured:
+        return True, ""
+    if _private_target(parts.hostname):
+        return True, ""
+    return False, (f"refusing to probe {parts.hostname}: it is not on this network. "
+                   "Save the URL and it will be tested on the next request.")
+
+
 @app.post("/api/test-connection")
 def post_test_connection(payload: dict = Body(default={})):
     """Probe Home Assistant with the saved (or just-supplied) URL and token."""
@@ -3807,11 +3886,15 @@ def post_test_connection(payload: dict = Body(default={})):
     token = str(payload.get("HA_TOKEN") or "").strip() or HA_TOKEN
     if not token:
         return {"ok": False, "detail": "no token set"}
+    allowed, why_not = _probe_allowed(url)
+    if not allowed:
+        return {"ok": False, "detail": why_not}
     try:
         response = requests.get(f"{url}/api/", headers={"Authorization": f"Bearer {token}"},
                                 timeout=5)
     except requests.RequestException as exc:
-        return {"ok": False, "detail": str(exc)}
+        # requests puts the whole URL, userinfo included, into its error text
+        return {"ok": False, "detail": redact_url(str(exc))}
     if response.status_code == 200:
         return {"ok": True, "detail": "connected", "ha_url": url}
     if response.status_code == 401:

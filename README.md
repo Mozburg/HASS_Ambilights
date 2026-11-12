@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.9.3** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.9.4** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.

@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.3"
+__version__ = "2.9.4"
 
 
 # ---------------------------------------------------------------- config ----

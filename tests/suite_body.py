@@ -1480,6 +1480,33 @@ assert _applied["xy"][0] > _white[0], "a stored warmth must reach what is sent"
 m.CALIBRATION.clear(); m.save_calibration()
 print("calibration ok: warmth round-trips through calibration.json into the payload")
 
+# every calibration frame must be able to move in BOTH hue directions. A saturated
+# primary sits on the sRGB corner, so +anything used to return the colour unchanged,
+# which is exactly "positive hue doesn't work".
+for _name, _rgb in m.CALIBRATION_FRAMES.items():
+    _xy = m.xy_from_rgb(_rgb)
+    if _name == "white":
+        continue
+    # the reference is a true primary, not a pastel of one
+    assert _rgb in ((255, 0, 0), (0, 255, 0), (0, 0, 255)), f"{_name} is not a primary: {_rgb}"
+    for _h in (-20, 20):
+        _moved = m._neo(m.calibrate_xy(_xy, _h, 1.0), _xy)
+        assert _moved > 0.010, f"{_name} hue {_h:+d} barely moved ({_moved:.4f} duv)"
+print("calibration ok: every frame moves both ways under hue, none sits on the corner")
+
+# the swatch is the colour, the number beside it is the level: rendering the swatch at
+# the sent level made pure red read #e00000 at brightness 40 and #ff0000 at 255, which
+# looks like the wrong colour when it is the right colour, dimmer
+_sat_red = {"rgb": [255, 0, 0], "xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.05}
+_other = dict(_sat_red, luminance=0.9)
+_lo, _hi = m.preview_colour(_sat_red), m.preview_colour(_other)
+assert _lo["hex"] == _hi["hex"] == "#ff0000", (_lo["hex"], _hi["hex"])
+assert _lo["brightness"] < _hi["brightness"], "the level must still be visible as a number"
+assert m.preview_colour({"rgb": [255, 153, 153],
+                         "xy": list(m.xy_from_rgb([255, 153, 153])),
+                         "luminance": 0.4})["hex"] == "#ff9999", "a muted colour stays muted"
+print("calibration ok: swatch shows the colour, brightness is the number that dims")
+
 # the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
 import types as _types
 _calls = []
@@ -1502,10 +1529,22 @@ try:
 
     _r = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
                              "level": "mid", "hue": 10, "chroma": 1.0, "level_scale": 1.0})
-    # the reference patch is the frame at its level, so mid red is half-strength
+    # the reference patch is the true primary at its level: mid red is half-strength red
     assert _r["ok"] and _r["sent"] and _r["reference"] == "#800000", _r
-    assert _r["xy"][0] > 0.6 and _r["brightness"] > 100, "mid red must be red and lit"
+    # the call applies hue 10, which walks red toward orange - still red-dominant
+    assert _r["xy"][0] > 0.45 and _r["xy"][0] > _r["xy"][1], "mid red must stay red-dominant"
+    assert _r["brightness"] > 60, "mid red must be lit"
     assert len([c for c in _calls if c[0] == "send"]) == 1, _calls
+
+    _dim = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
+                               "level": "mid", "level_scale": 0.4})
+    _bright = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
+                                  "level": "mid", "level_scale": 2.2})
+    assert _dim["ok"] and _bright["ok"], (_dim, _bright)
+    assert _dim["brightness"] < _bright["brightness"] * 0.65, (
+        f"the brightness slider must move a colour frame: {_dim['brightness']} vs "
+        f"{_bright['brightness']}")
+    print("calibration ok: brightness moves a colour frame, not just white")
 
     _bad = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "mauve"})
     assert _bad.status_code == 400, "an unknown frame must be refused"
@@ -1557,6 +1596,8 @@ assert "cal-hue" in _ui and "cal-chroma" in _ui and "cal-level" in _ui
 # white gets brightness + warmth, never a chroma slider that cannot move it
 assert 'slider("cal-warmth"' in _ui and 'wire("cal-warmth", "warmth")' in _ui
 assert "chroma: white ? 1.0 : CAL.chroma" in _ui
+assert "level_scale: CAL.level" in _ui, "the brightness slider must reach every frame"
+assert "level_scale: white ? CAL.level : 1.0" not in _ui, "it used to be white-only"
 # a drag is one intent: the trailing edge sends, in-flight work coalesces
 assert "CAL_DEBOUNCE_MS" in _ui and "clearTimeout(CAL_TIMER)" in _ui
 assert "if (CAL_INFLIGHT) { CAL_PENDING = true; return; }" in _ui

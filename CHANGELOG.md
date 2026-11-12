@@ -8,6 +8,25 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.10.1] — 2026-11-12
+
+### Fixed
+- **Warm/cool did nothing.** It was implemented as a chroma scale, and a white frame sits
+  *exactly* on D65 — scaling a distance of zero moves the point nowhere, so the slider was
+  inert by construction. Warmth is now its own term: a displacement along the Planckian
+  locus (a full slider is about 1300K), stored as `warmth` per light, applied to every
+  frame — a lamp's white-point bias is not limited to white. Existing `calibration.json`
+  files load with `warmth: 0` and change nothing.
+- **The slider sent every step it passed through.** A drag fired one POST per `input`
+  event, so the light chased a dozen intermediate colours before settling. Sends are now
+  debounced (220 ms, trailing edge) and coalesced: if one is in flight the newest value
+  waits and goes next, so the final position always wins. Measured: 12 input events in a
+  burst produced **one** POST carrying the last value. Step changes still send at once.
+
+### Changed
+- The white frame shows **Warmth (− cool, + warm)** instead of a saturation slider that
+  could not affect it, and the label says which way it goes.
+
 ## [2.10.0] — 2026-11-12
 
 ### Added

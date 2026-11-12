@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.10.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.10.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -164,6 +164,7 @@ reference patch on screen and sets that light to the same colour. Drag **hue**,
 
 | | |
 |---|---|
+| white | brightness and **warmth** (− cool, + warm): a saturation slider cannot move a neutral, because it sits exactly on D65 |
 | quick pass | white + red/green/blue, one level each — **4 frames**, about a minute |
 | refined | carries straight on with dark and light for each colour — **10 frames** |
 | full | adds dark and light for white too, so the level curve gets three points — **12 frames** |

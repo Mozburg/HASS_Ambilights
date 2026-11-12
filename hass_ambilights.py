@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.10.0"
+__version__ = "2.10.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1453,7 +1453,7 @@ async function watchRestart(port) {
 // set to the same colour and soloed, and the user nudges hue / chroma / level
 // until the two look alike. The offsets are what the payload applies afterwards.
 const CAL = {
-  entity: null, steps: [], index: 0, hue: 0, chroma: 1.0, level: 1.0,
+  entity: null, steps: [], index: 0, hue: 0, chroma: 1.0, level: 1.0, warmth: 0.0,
   active: false, busy: false, mode: "quick",   // quick 4 -> refine 10 -> full 12
 };
 
@@ -1511,14 +1511,39 @@ function calStepLabel() {
   return `${step.frame} · ${step.level}`;
 }
 
-async function calApply() {
+// The light must not chase every intermediate position: a drag is one intent. Debounce
+// the trailing edge, and if a send is already in flight remember that another value is
+// waiting so the final position always wins (the pipeline's own newest-frame rule).
+let CAL_TIMER = null, CAL_INFLIGHT = false, CAL_PENDING = false;
+const CAL_DEBOUNCE_MS = 220;
+
+function calApply(immediate) {
+  if (immediate) {
+    clearTimeout(CAL_TIMER); CAL_TIMER = null;
+    return calSend();
+  }
+  clearTimeout(CAL_TIMER);
+  CAL_TIMER = setTimeout(() => { CAL_TIMER = null; calSend(); }, CAL_DEBOUNCE_MS);
+}
+
+async function calSend() {
   const step = CAL.steps[CAL.index];
+  if (!step) return;
+  if (CAL_INFLIGHT) { CAL_PENDING = true; return; }
+  CAL_INFLIGHT = true;
   const white = step.frame === "white";
   const body = {
     action: "apply", entity: CAL.entity, frame: step.frame, level: step.level,
-    hue: white ? 0 : CAL.hue, chroma: CAL.chroma, level_scale: white ? CAL.level : 1.0,
+    hue: white ? 0 : CAL.hue, chroma: white ? 1.0 : CAL.chroma,
+    warmth: white ? CAL.warmth : 0.0, level_scale: white ? CAL.level : 1.0,
   };
-  const out = await calCall(body);
+  let out;
+  try {
+    out = await calCall(body);
+  } finally {
+    CAL_INFLIGHT = false;
+    if (CAL_PENDING) { CAL_PENDING = false; calApply(true); return; }
+  }
   const sent = document.getElementById("cal-sent");
   if (sent) {
     sent.textContent = out.ok
@@ -1555,10 +1580,10 @@ function renderCalibration() {
           </div>
         </div>
         ${white ? slider("cal-level", "Brightness", 0.3, 1.6, CAL.level, 0.01)
+                  + slider("cal-warmth", "Warmth \u2212 cool, + warm", -1, 1, CAL.warmth, 0.02)
                 : slider("cal-hue", "Hue", -45, 45, CAL.hue, 1)
                   + slider("cal-chroma", "Saturation", 0.4, 1.8, CAL.chroma, 0.01)
                   + slider("cal-level", "Brightness", 0.5, 1.6, CAL.level, 0.01)}
-        ${white ? slider("cal-chroma", "Warm / cool", 0.5, 1.5, CAL.chroma, 0.01) : ""}
         <div class="actions" style="padding-top:10px">
           <button class="btn primary" id="cal-next" type="button">Looks right</button>
           <button class="btn" id="cal-skip" type="button">Skip</button>
@@ -1583,11 +1608,13 @@ function renderCalibration() {
   wire("cal-hue", "hue");
   wire("cal-chroma", "chroma");
   wire("cal-level", "level");
+  wire("cal-warmth", "warmth");
 
   $("cal-next").onclick = async () => {
     const body = {
       action: "commit", entity: CAL.entity,
-      hue: white ? 0 : CAL.hue, chroma: CAL.chroma, level: CAL.level,
+      hue: white ? 0 : CAL.hue, chroma: white ? 1.0 : CAL.chroma,
+      warmth: white ? CAL.warmth : 0.0, level: CAL.level,
     };
     const out = await calCall(body);
     if (!out.ok) { toast("Could not save: " + out.error, true); return; }
@@ -1595,7 +1622,7 @@ function renderCalibration() {
   };
   $("cal-skip").onclick = advance;
   $("cal-back").onclick = () => {
-    if (CAL.index > 0) { CAL.index -= 1; renderCalibration(); calApply(); }
+    if (CAL.index > 0) { CAL.index -= 1; renderCalibration(); calApply(true); }
   };
   $("cal-full").onclick = () => {
     CAL.mode = CAL.mode === "full" ? "quick" : "full";
@@ -1605,7 +1632,7 @@ function renderCalibration() {
   };
   $("cal-end").onclick = closeCalibration;
   CAL.busy = false;
-  calApply();
+  calApply(true);                    // a new frame goes out at once
 }
 
 function advance() {
@@ -2678,13 +2705,21 @@ def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> 
     return np.concatenate([zone_cells[z - 1] for z in sorted(target.zones)], axis=0)
 
 
-def calibrate_xy(xy, hue_deg: float, chroma: float):
-    """Rotate the hue and scale the chroma around D65, leaving the hue's own level.
+# The warm direction in u'v': 6500K is (0.198, 0.468), 3000K is (0.257, 0.521), so both
+# components rise as the colour temperature falls. Scaled so a full slider is about
+# 1300K of shift - the range that reads as "too warm / too cool" under a lamp.
+WARMTH_UV = (0.024, 0.021)
 
-    A bulb that renders blue as cyan cannot be fixed with saturation alone: the
-    correction has to rotate the chromaticity, which is what this does in u'v'.
+
+def calibrate_xy(xy, hue_deg: float, chroma: float, warmth: float = 0.0):
+    """Rotate the hue, scale the chroma, and slide along the Planckian locus.
+
+    A bulb that renders blue as cyan cannot be fixed with saturation alone: the correction
+    has to rotate the chromaticity, which is what this does in u'v'. A bulb that renders
+    *white* too warm cannot be fixed by saturation either, because a neutral sits exactly
+    on D65 and scaling a zero distance moves nothing - that is what warmth is for.
     """
-    if not hue_deg and chroma == 1.0:
+    if not hue_deg and chroma == 1.0 and not warmth:
         return tuple(xy)
     base = _xy_to_uv(D65_XY)
     u, v = _xy_to_uv(xy)
@@ -2693,6 +2728,9 @@ def calibrate_xy(xy, hue_deg: float, chroma: float):
         angle = math.radians(hue_deg)
         du, dv = du * math.cos(angle) - dv * math.sin(angle), du * math.sin(angle) + dv * math.cos(angle)
     du, dv = du * chroma, dv * chroma
+    if warmth:
+        du += WARMTH_UV[0] * warmth
+        dv += WARMTH_UV[1] * warmth
     out = _uv_to_xy((base[0] + du, base[1] + dv))
     return out if valid_xy(out) else tuple(xy)
 
@@ -2702,7 +2740,8 @@ def apply_calibration(colour: dict, cal: dict) -> dict:
     if not cal:
         return colour
     colour["xy"] = [round(v, 4) for v in calibrate_xy(
-        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)))]
+        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)),
+        float(cal.get("warmth", 0.0)))]
     colour["calibration_level"] = float(cal.get("level", 1.0))
     colour["rgb"] = srgb_from_xy(tuple(colour["xy"]), max(colour.get("luminance", 0.0), 1e-4))
     if "dominant" in colour:
@@ -4052,6 +4091,7 @@ def load_calibration() -> None:
                 "hue": float(entry.get("hue", 0.0) or 0.0),
                 "chroma": float(entry.get("chroma", 1.0) or 1.0),
                 "level": float(entry.get("level", 1.0) or 1.0),
+                "warmth": float(entry.get("warmth", 0.0) or 0.0),
             }
 
 
@@ -4142,9 +4182,11 @@ def post_calibration(payload: Any = Body(...)):
         hue = float(payload.get("hue") or 0.0)
         chroma = float(payload.get("chroma") or 1.0)
         level_scale = float(payload.get("level_scale") or 1.0)
+        warmth = float(payload.get("warmth") or 0.0)
         if frame == "white":
-            hue = 0.0                      # white only gets warm/cool, which is chroma
-        xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma)
+            hue = 0.0                      # white only gets brightness and warm/cool
+            chroma = 1.0                   # scaling a neutral moves nothing; warmth does
+        xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma, warmth)
         colour = {"rgb": rgb, "xy": [round(xy[0], 4), round(xy[1], 4)],
                   "luminance": max(0.02, level_scale * 0.4), "calibration_level": 1.0}
         brightness = brightness_for_colour(colour)
@@ -4161,7 +4203,8 @@ def post_calibration(payload: Any = Body(...)):
         if not entity.startswith("light."):
             return JSONResponse({"ok": False, "error": "entity must be a light"}, status_code=400)
         CALIBRATION[entity] = {"hue": round(hue, 1), "chroma": round(chroma, 3),
-                               "level": round(level_scale, 3)}
+                               "level": round(level_scale, 3),
+                               "warmth": round(float(payload.get("warmth") or 0.0), 3)}
         saved = save_calibration()
         return {"ok": True, "saved": saved, "lights": CALIBRATION}
 

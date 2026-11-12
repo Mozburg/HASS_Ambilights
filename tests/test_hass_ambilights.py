@@ -1390,6 +1390,22 @@ assert "StartLimitBurst" in _unit
 assert "--server --no-browser" in _unit
 print("service unit ok: no token, display, user, start limit, headless mode")
 
+# --- wave five: no LAN port scanning, no stolen focus ----------------------
+assert m._probe_allowed("http://192.168.1.10:8123")[0] is True
+assert m._probe_allowed("http://127.0.0.1:8123")[0] is True
+_public_ok, _public_why = m._probe_allowed("http://8.8.8.8:8123")
+assert _public_ok is False and "not on this network" in _public_why, _public_why
+assert m._probe_allowed("file:///etc/passwd")[0] is False
+assert "hunter2" not in m.redact_url("Failed: http://user:hunter2@h:1/api/")
+# a URL with credentials is refused, so the request never applies
+_rejected = _post_errors({"HA_URL": "http://u:p@h:8123", "persist": False})
+assert _rejected and "credentials in the token" in _rejected[0], _rejected
+print("ssrf ok: public hosts refused, userinfo redacted and rejected")
+
+_ui = m.UI_HTML
+assert "captureFocus()" in _ui and "restoreFocus(focusBefore)" in _ui
+print("focus ok: a refresh puts the caret back")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False

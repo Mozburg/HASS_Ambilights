@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.10.2** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.11.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -151,6 +151,30 @@ has: `0` combines every monitor onto one canvas, `1` is the primary, `2+` are th
 each labelled with its resolution and position. Multi-monitor setups no longer have to
 guess which index is the screen they're looking at.
 
+## White frames use the bulb's own white
+
+Most bulbs have a dedicated warm/cool LED pair for white, and a separate RGB set for
+colour. Asking for *white* in `xy` often engages the RGB mixing, which is dimmer and less
+accurate than the white channel the bulb was built around. So neutral frames are sent as
+`color_temp_kelvin` instead, and coloured frames stay on `xy`:
+
+- **Neutral** means within duv 0.006 of the Planckian locus — a green or pink tint is not
+  a colour temperature and stays on `xy`. Warm whites (2700 K) qualify just as much as
+  daylight ones: distance from D65 is *not* the test, tint is.
+- The kelvin is clamped to the bulb's own `min/max_color_temp_kelvin`; out of range means
+  `xy`, which can render the extremes a colour temperature cannot.
+- **Hysteresis**: three consecutive neutral frames and 0.5 s before switching to kelvin;
+  a clearly coloured frame leaves it immediately. Otherwise a pale scene toggles the radio
+  between two colour modes every frame.
+- The calibration **warmth** slider applies here, as a kelvin shift — and *only* here. It
+  never tints a coloured frame, which is what you want: white is corrected on the white
+  channel, colour is corrected in xy.
+- `WHITE_MODE` (Advanced → Sending) is `auto` (default), `color_temp` (neutral frames
+  only) or `xy` (never, the old behaviour).
+
+`GET /api/lights` reports `white_channel` per light, and `/health` counts `cct_posts` so
+you can see the split for yourself.
+
 ## Calibrating to your own eyes
 
 The **Calibration** card does the job the old automatic check could not. That check
@@ -193,6 +217,7 @@ still runs the old twelve-colour accuracy sweep.
 | `CHROMA_FLOOR` | how colourful a cell must be to vote at all — this is what makes white pages and grey UI stop washing the colour out (default du'v' 0.010) |
 | `HUE_BINS` | dominant mode's hue resolution: 24 = 15° buckets, and the winner is averaged with its two neighbours. Lower merges two similar hues into one steady colour; higher separates them but can flicker between neighbours (default 24) |
 | `SEND_BRIGHTNESS` | off leaves the lamp's level alone; sits directly above the follow flag |
+| `WHITE_MODE` | `auto` sends neutral frames as colour temperature (the bulb's white LEDs), `xy` keeps everything on chromaticity |
 | `SATURATION_BOOST` | (Calibration card) off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
 | `BRIGHTNESS_FROM` | (Calibration card) `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
 | `BRIGHTNESS_GAMMA` | (Calibration card) tone curve on the brightness input |

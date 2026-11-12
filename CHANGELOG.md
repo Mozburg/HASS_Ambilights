@@ -8,6 +8,33 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-11-12
+
+### Added
+- **Neutral frames go out as `color_temp_kelvin`.** A bulb's white is usually a dedicated
+  warm/cool LED pair; asking for white in `xy` often engages RGB mixing, which is dimmer and
+  less accurate. Coloured frames stay on `xy`. Measured on a white screen: settled at
+  **6380 K** on the kelvin channel, where the same frame had been going out as
+  `xy_color`.
+- **`WHITE_MODE`** (`auto` | `color_temp` | `xy`, default `auto`) in Advanced → Sending.
+- `GET /api/lights` reports `white_channel` and the kelvin range per light; `/health`
+  counts `cct_posts`.
+
+### Changed
+- **Warmth is now a white-only correction**, applied as a kelvin shift on the white
+  channel. It no longer tints coloured frames — colour is corrected by hue and saturation
+  in xy, white by temperature on the bulbs' own LEDs.
+- "Neutral" is decided by distance from the Planckian locus (duv), not by distance from
+  D65: a 2700 K white is nowhere near D65 and is exactly what the kelvin channel is for.
+
+### Fixed
+- The mode is decided per measured frame, not per send: on a static white screen dedupe
+  means few sends, and the state would never have advanced off `xy`.
+- A mode change now counts as a payload change, so the switch is actually sent instead of
+  being deduped away.
+- Colour frames can never be expressed as a colour temperature, hysteresis or not — an
+  earlier draft would have sent a red frame as 1480 K.
+
 ## [2.10.2] — 2026-11-12
 
 ### Fixed

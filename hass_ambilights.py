@@ -188,7 +188,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.9.1"
+__version__ = "2.9.2"
 
 
 # ---------------------------------------------------------------- config ----
@@ -706,6 +706,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
+let lightsTouched = false;      // the mapping is only rewritten when edited here
 let ZONE_ROWS = 3, ZONE_COLS = 3, ZONE_COUNT = 9;
 let META = [], CFG = {}, LIGHTS = [], dirty = false, lastPosts = null, lastPostT = null, rate = 0;
 let LASTCONFIG = null;
@@ -817,7 +818,10 @@ function renderLights() {
           name.appendChild(group);
         });
       if (!light.entity) name.value = "";
-      name.onchange = () => { LIGHTS[i].entity = name.value; setDirty(true, true); markUsedZones(); };
+      name.onchange = () => {
+        LIGHTS[i].entity = name.value; lightsTouched = true;
+        setDirty(true, true); markUsedZones();
+      };
     } else {
       name = document.createElement("input");
       name.type = "text";
@@ -841,6 +845,7 @@ function renderLights() {
       b.setAttribute("aria-pressed", light.zones.has(z) ? "true" : "false");
       b.title = `Zone ${z}`;
       b.onclick = () => {
+        lightsTouched = true;
         light.zones.has(z) ? light.zones.delete(z) : light.zones.add(z);
         b.className = light.zones.has(z) ? "on" : "";
         b.setAttribute("aria-pressed", light.zones.has(z) ? "true" : "false");
@@ -1189,6 +1194,7 @@ async function reload() {
   $("hapill").textContent = data.ha_url;
   renderSettings();
   renderLights();
+  lightsTouched = false;          // rehydrated from the server: nothing edited here
   setDirty(!!data.unsaved, false); // live values that the file doesn't have yet
 }
 
@@ -1196,7 +1202,7 @@ function applyLive() {
   clearTimeout(liveTimer);
   liveTimer = setTimeout(async () => {
     const seq = ++liveSeq;
-    CFG.LIGHT_MAP = serializeMap(LIGHTS);      // lights/zones are live too
+    if (lightsTouched) CFG.LIGHT_MAP = serializeMap(LIGHTS);   // lights/zones are live too
     const settings = {};
     const visible = new Set(META.filter((m) => !m.hidden).map((m) => m.name));
     Object.keys(CFG).forEach((k) => {
@@ -1212,6 +1218,17 @@ function applyLive() {
       if (!data.ok) { toast("Ignored: " + data.errors.join(" · "), true); return; }
       LASTCONFIG = LASTCONFIG || {};
       LASTCONFIG.restart_required = data.restart_required || [];
+      // the server normalises (HA_URL loses a trailing slash, numbers round): show
+      // what was stored, or the field and the app disagree until the next reload
+      if (data.settings) {
+        Object.entries(data.settings).forEach(([key, value]) => {
+          if (key in CFG && key !== "HA_TOKEN" && String(CFG[key]) !== String(value)) {
+            CFG[key] = value;
+            const el = document.getElementById(`set-${key}`);
+            if (el && el !== document.activeElement && el.type !== "checkbox") el.value = value;
+          }
+        });
+      }
     } catch (e) {
       toast("Live apply failed: " + e.message, true);
     }
@@ -1219,7 +1236,9 @@ function applyLive() {
 }
 
 async function save() {
-  CFG.LIGHT_MAP = serializeMap(LIGHTS);
+  // only re-serialise when the lights editor actually changed: doing it on every
+  // save reformatted the file's own LIGHT_MAP (spacing, zone order) for no reason
+  if (lightsTouched) CFG.LIGHT_MAP = serializeMap(LIGHTS);
   $("save").disabled = true;
   try {
     const r = await fetch("/api/config", {

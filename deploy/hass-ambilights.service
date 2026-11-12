@@ -1,21 +1,26 @@
 [Unit]
-Description=Hass Ambilights - mirror the screen onto Home Assistant lights
-After=network-online.target
+Description=HASS Ambilights - mirror the screen onto Home Assistant lights
+After=graphical-session.target network-online.target
 Wants=network-online.target
+# A wrong port or address exits non-zero; without a limit that becomes a restart
+# loop every RestartSec.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
+# Run as the desktop user who owns the session, or the capture thread has no display.
+User=%i
 WorkingDirectory=/opt/hass-ambilights
-Environment=HA_URL=http://192.168.1.10:8123
-Environment=HA_TOKEN=replace-me
-# The code defaults to 127.0.0.1 (this machine only). Comment this out to keep the
-# settings UI local — the UI has no login, so only expose it on a trusted network.
-Environment=BIND_HOST=0.0.0.0
-ExecStart=/opt/hass-ambilights/.venv/bin/python hass_ambilights.py
+# Credentials, mode 0600, so the token is not in a world-readable unit file:
+#   HA_URL=http://192.168.1.10:8123
+#   HA_TOKEN=...
+EnvironmentFile=-/etc/hass-ambilights.env
+# The capture thread needs the session's X display on X11 (not Wayland, not Windows).
+Environment=DISPLAY=:0
+ExecStart=/opt/hass-ambilights/.venv/bin/python hass_ambilights.py --server --no-browser
 Restart=on-failure
 RestartSec=5
-# the capture thread needs the session's display/screen access
-# DISPLAY=:0 is only needed on X11; Windows runs it as a normal user process
 
 [Install]
-WantedBy=graphical.target
+WantedBy=graphical-session.target

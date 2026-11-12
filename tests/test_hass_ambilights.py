@@ -1369,6 +1369,27 @@ assert "setDirty(!!data.unsaved, false)" in _ui_src, "hydrating must not fire a 
 assert "if (++misses > 5)" in _ui_src, "the calibrate poll must give up"
 print("ui ok: no empty-zone inflation, no hidden-key saves, no POST on load")
 
+# --- wave four: the example config must not fall behind the code -----------
+_example_path = Path(m.__file__).with_name("config.example.json")
+_example = _json.loads(_example_path.read_text(encoding="utf-8"))
+_missing = sorted(s["name"] for s in m.SETTINGS
+                  if not s.get("hidden") and s["type"] != "secret"
+                  and s["name"] not in _example)
+assert not _missing, f"config.example.json is missing {_missing}"
+assert "COLOUR_BLEND" in _example and "ZONE_ROWS" in _example
+print(f"example config ok: all {len(_example)} visible settings present")
+
+# the unit must not ship a token, and must name a display and a start limit
+_unit = (_example_path.parent / "deploy" / "hass-ambilights.service").read_text(encoding="utf-8")
+assert not [ln for ln in _unit.splitlines()
+            if ln.strip().startswith("Environment=") and "HA_TOKEN" in ln], \
+    "the unit must not carry a token (a commented example is fine)"
+assert "EnvironmentFile=-/etc/hass-ambilights.env" in _unit
+assert "DISPLAY=" in _unit and "User=%i" in _unit
+assert "StartLimitBurst" in _unit
+assert "--server --no-browser" in _unit
+print("service unit ok: no token, display, user, start limit, headless mode")
+
 # --- desktop mode helpers --------------------------------------------------
 _keep_frozen = m.FROZEN
 m.FROZEN = False

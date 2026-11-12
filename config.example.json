@@ -1,7 +1,8 @@
 {
-  "COLOR_ALGO": "dominant",
-  "DOMINANT_MIX": 0.5,
-  "DOMINANT_LUMINANCE": "cluster",
+  "HA_URL": "http://192.168.1.10:8123",
+  "COLOUR_BLEND": 0.5,
+  "BRIGHTNESS_FOLLOW_COLOUR": true,
+  "BRIGHTNESS_BLEND": 0.5,
   "CHROMA_FLOOR": 0.01,
   "HUE_BINS": 24,
   "SATURATION_BOOST": false,
@@ -12,6 +13,8 @@
   "SEND_BRIGHTNESS": true,
   "BRIGHTNESS_FROM": "lstar",
   "BRIGHTNESS_GAMMA": 0.8,
+  "ZONE_ROWS": 3,
+  "ZONE_COLS": 3,
   "CAPTURE_FPS": 12.0,
   "CAPTURE_STRIDE": 4,
   "IDLE_FPS": 4.0,
@@ -29,5 +32,9 @@
   "FAIL_THRESHOLD": 3,
   "FAIL_COOLDOWN": 10.0,
   "DRY_RUN": false,
-  "LIGHT_MAP": ""
+  "LIGHT_MAP": "",
+  "BIND_HOST": "127.0.0.1",
+  "CLOSE_TO_TRAY": true,
+  "START_WITH_WINDOWS": false,
+  "BIND_PORT": 8000
 }

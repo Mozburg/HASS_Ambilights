@@ -8,6 +8,27 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.9.2] — 2026-11-11
+
+Wave four: the last of the audit's user-visible items.
+
+### Fixed
+- **A save no longer rewrites a light mapping you did not touch.** The page re-serialised
+  `LIGHT_MAP` from its own editor every time, so saving an unrelated setting reformatted
+  the file (spacing, zone order) and could renumber a hand-written map. The mapping is only
+  rebuilt when the lights editor itself changed.
+- **The page adopts the values the server stored.** `applyLive` discarded the `settings`
+  block in the response, so a field could disagree with the running app until the next
+  reload — a trailing slash on `HA_URL`, for instance.
+- **`config.example.json` was stale**: it still listed only the legacy colour keys, so
+  copying it produced a config whose colour model was silently ignored. It is now generated
+  from the settings table (38 keys), and a test fails if it falls behind.
+- **The systemd unit can actually work**: it sets `User=`, exports `DISPLAY=:0` for the
+  capture thread, runs `--server --no-browser` (it used to open a browser from a service),
+  reads credentials from a 0600 `EnvironmentFile` instead of baking a placeholder token into
+  a world-readable file, drops the `Environment=BIND_HOST` that `config.json` silently
+  overrode, and has `StartLimitBurst` so a port clash cannot restart forever.
+
 ## [2.9.1] — 2026-11-11
 
 Wave three of the audit: the failure modes that made a broken install look healthy.

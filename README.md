@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.12.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.13.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -150,6 +150,68 @@ covered by the zones in use is captured at all.
 has: `0` combines every monitor onto one canvas, `1` is the primary, `2+` are the rest,
 each labelled with its resolution and position. Multi-monitor setups no longer have to
 guess which index is the screen they're looking at.
+
+## White frames use the bulb's own white
+
+Most bulbs have a dedicated warm/cool LED pair for white, and a separate RGB set for
+colour. Asking for *white* in `xy` often engages the RGB mixing, which is dimmer and less
+accurate than the white channel the bulb was built around. So neutral frames are sent as
+`color_temp_kelvin` instead, and coloured frames stay on `xy`:
+
+- **Neutral** means within duv 0.006 of the Planckian locus — a green or pink tint is not
+  a colour temperature and stays on `xy`. Warm whites (2700 K) qualify just as much as
+  daylight ones: distance from D65 is *not* the test, tint is.
+- The kelvin is clamped to the bulb's own `min/max_color_temp_kelvin`; out of range means
+  `xy`, which can render the extremes a colour temperature cannot.
+- **Hysteresis**: three consecutive neutral frames and 0.5 s before switching to kelvin;
+  a clearly coloured frame leaves it immediately. Otherwise a pale scene toggles the radio
+  between two colour modes every frame.
+- The calibration **warmth** slider applies here, as a kelvin shift — and *only* here. It
+  never tints a coloured frame, which is what you want: white is corrected on the white
+  channel, colour is corrected in xy.
+- `WHITE_MODE` (Advanced → Sending) is `auto` (default), `color_temp` (neutral frames
+  only) or `xy` (never, the old behaviour).
+
+`GET /api/lights` reports `white_channel` per light, and `/health` counts `cct_posts` so
+you can see the split for yourself. Nothing here assumes a particular bulb: if a light
+reports `color_temp` and its kelvin bounds, it gets the kelvin path; if it reports neither,
+it stays on `xy`, which every light supports.
+
+## Calibrating to your own eyes
+
+Calibration corrects the three things that actually limit a lamp in an ambilight, and skips
+the one people cannot judge. **Hue and saturation are never calibrated** — the screen already
+says what colour the frame is, and "rotate this red by eight degrees" is not something a
+person can eyeball.
+
+Press **Calibrate…** and you get six steps per light, one slider at a time:
+
+| step | what you match | what it sets |
+|---|---|---|
+| black | as dim as the lamp goes without switching off | the floor of the level curve |
+| grey | a mid-grey page — neither glowing nor muddy | the middle of the curve |
+| white | a white page, then the white **temperature** | the top of the curve, and the lamp's white point |
+| red | brightness only, to look as bright as green and blue will | how hard red may be driven |
+| green | same apparent brightness | ... green's ceiling |
+| blue | same apparent brightness | ... blue's ceiling |
+
+Why those three: a bulb's **level response** is not the gamma curve of a monitor, its
+**white** often leans warm or cool, and its **maximum output varies by colour** — red at full
+power can be half the apparent brightness of green at full power. The primaries are compared
+to *each other*, not to the patch, because "as bright as the other colours" is the judgement
+a person can actually make. Whichever colour you set brightest becomes the reference and the
+others are scaled down to match, so no colour outshines another.
+
+**It runs per light**, because two lamps of the same model are not the same lamp: press
+Calibrate once and the panel walks every mapped light (`light 2 of 3`), soloing each one —
+the rest are switched off while you match, and everything is restored when you finish. Each
+light keeps its own points; **Clear** on the Calibration card forgets one.
+
+Anything uncalibrated keeps the generic response (`BRIGHTNESS_FROM`, `BRIGHTNESS_GAMMA`),
+so the program works before you calibrate anything.
+
+`SATURATION_BOOST`, `BRIGHTNESS_FROM` and `BRIGHTNESS_GAMMA` sit under **Advanced** in the
+same card. `--calibrate` on the command line still runs the old twelve-colour accuracy sweep.
 
 ## White frames use the bulb's own white
 

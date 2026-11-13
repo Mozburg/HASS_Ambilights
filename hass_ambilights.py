@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.12.0"
+__version__ = "2.13.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -395,19 +395,22 @@ WN = (0.95047, 1.00000, 1.08883)
 D65_XY = (0.3127, 0.3290)
 CALIBRATION_FILE = "calibration.json"      # beside config.json, gitignored
 # what the calibration asks the user to look at, in the order it is shown
-# True primaries: the reference has to be the colour you are calibrating against, not a
-# pastel of it. A primary sits on the sRGB corner, so calibrate_xy rides the gamut
-# boundary to keep hue travel instead of shrinking the frame to make room.
+# Three level patches and three primaries. Level patches set the brightness response;
+# primaries set how hard each colour may be driven before it outshines the others.
 CALIBRATION_FRAMES = {
+    "black": (0, 0, 0),
+    "grey": (128, 128, 128),
     "white": (255, 255, 255),
     "red": (255, 0, 0),
     "green": (0, 255, 0),
     "blue": (0, 0, 255),
 }
-CALIBRATION_LEVELS = {"dark": 0.25, "mid": 0.5, "light": 0.82}
-# The level's own brightness, separate from how far the on-screen patch is dimmed: the
-# ladder has to be three clearly different outputs, not three shades of "quite bright".
-CALIBRATION_BRIGHTNESS = {"dark": 0.12, "mid": 0.45, "light": 0.90}   # of full scale
+# linear luminance each level patch stands for: 0, 50% grey, full white. These are the
+# x values of the three measured points.
+CALIBRATION_LEVEL_LUMINANCE = {"black": 0.0, "grey": 0.2159, "white": 1.0}
+# where the brightness slider starts for each step; the user moves it until it matches
+CALIBRATION_START_BRIGHTNESS = {"black": 20, "grey": 150, "white": 240,
+                                "red": 200, "green": 200, "blue": 200}
 
 # --------------------------------------------------------------- targets ----
 class Target:
@@ -1460,38 +1463,12 @@ async function watchRestart(port) {
 
 
 /* ---------------------------------------------------------- calibration -- */
-// Semi-manual, per light: the screen shows an exact reference patch, the lamp is
-// set to the same colour and soloed, and the user nudges hue / chroma / level
-// until the two look alike. The offsets are what the payload applies afterwards.
-const CAL = {
-  entity: null, steps: [], index: 0, hue: 0, chroma: 1.0, level: 1.0, warmth: 0.0,
-  active: false, busy: false, mode: "quick",   // quick 4 -> refine 10 -> full 12
-  queue: [], qindex: 0,                        // every mapped light, one at a time
-};
-
-const CAL_FRAMES = { white: [255, 255, 255], red: [255, 0, 0],
-                     green: [0, 255, 0], blue: [0, 0, 255] };
-const CAL_LEVELS = { dark: 0.25, mid: 0.5, light: 0.82 };
-
-// quick  = white + R/G/B, one level each            -> 4 steps
-// refine = the same plus dark and light for R/G/B    -> 10 steps (automatic)
-// full   = dark, mid and light for white and R/G/B   -> 12 steps
-function calSteps(mode) {
-  const levels = mode === "quick" ? ["mid"] : ["dark", "mid", "light"];
-  const out = [];
-  if (mode === "full") levels.forEach((level) => out.push({ frame: "white", level }));
-  else out.push({ frame: "white", level: "mid" });
-  ["red", "green", "blue"].forEach((frame) => {
-    levels.forEach((level) => out.push({ frame, level }));
-  });
-  return out;
-}
-
-function calReference(step) {
-  const rgb = CAL_FRAMES[step.frame].map((c) => Math.round(c * (CAL_LEVELS[step.level] || 0.5)));
-  return "#" + rgb.map((c) => c.toString(16).padStart(2, "0")).join("");
-}
-
+// Six steps per light, one slider at a time. Level comes from three measured points, white
+// from its own kelvin, and each primary from how hard it can be pushed before it outshines
+// the others - a bulb's maximum output varies by colour, sometimes by a factor of two.
+// Hue and saturation are not calibrated: the screen already knows them, and nobody can
+// eyeball "rotate red eight degrees".
+const CAL_STEPS = ["black", "grey", "white", "red", "green", "blue"];
 async function calCall(payload) {
   const r = await fetch("/api/calibration", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1499,50 +1476,50 @@ async function calCall(payload) {
   });
   return r.json();
 }
+const CAL_FRAMES = { black: [0, 0, 0], grey: [128, 128, 128], white: [255, 255, 255],
+                     red: [255, 0, 0], green: [0, 255, 0], blue: [0, 0, 255] };
+const CAL_START = { black: 20, grey: 150, white: 240, red: 200, green: 200, blue: 200 };
+const CAL_HELP = {
+  black: "Turn it down until the lamp is as dim as it goes without switching off.",
+  grey: "Match a mid grey page: neither glowing nor muddy.",
+  white: "Match a white page for brightness, then nudge the colour temperature until the "
+         + "lamp's white matches the screen's.",
+  red: "Make this as bright as green and blue will be - this is what stops one colour "
+       + "outshining the others.",
+  green: "Same apparent brightness as red. Green usually looks brightest at equal power.",
+  blue: "Same apparent brightness again. Blue usually needs the most pushing.",
+};
 
-// Calibration is per light - the lamps differ, and each one is soloed while it is being
-// matched - but the session walks all of them so nobody has to remember which are done.
-async function openCalibration() {
-  const mapped = LIGHTS.map((l) => l.entity.trim()).filter(Boolean);
-  if (!mapped.length) { toast("Pick a light first", true); return; }
-  CAL.queue = mapped;
-  CAL.qindex = 0;
-  CAL.mode = "quick";
-  if (!(await calEnter(CAL.queue[0]))) return;
-  CAL.active = true;
-  renderCalibration();
+const CAL = {
+  entity: null, index: 0, queue: [], qindex: 0, active: false, busy: false,
+  values: {}, kelvin: null, white_scale: 1.0,
+};
+
+function calDefaults() {
+  const values = {};
+  CAL_STEPS.forEach((frame) => { values[frame] = CAL_START[frame]; });
+  return values;
 }
 
-async function calEnter(entity) {
-  CAL.entity = entity;
-  CAL.steps = calSteps(CAL.mode);
-  CAL.index = 0;
-  // each light starts from its own stored offsets, not the previous lamp's
-  const known = (CAL_CURRENT || {})[entity];
-  CAL.hue = known ? Number(known.hue) || 0 : 0;
-  CAL.chroma = known ? Number(known.chroma) || 1 : 1.0;
-  CAL.level = known ? Number(known.level) || 1 : 1.0;
-  CAL.warmth = known ? Number(known.warmth) || 0 : 0;
-  const started = await calCall({ action: CAL.active ? "switch" : "start", entity });
-  if (!started.ok) { toast("Calibration: " + started.error, true); return false; }
-  return true;
+function calStep() { return CAL_STEPS[CAL.index]; }
+
+function calCaps() {
+  // the three chosen brightnesses say which colours are equally bright; normalise so the
+  // strongest one is 1.0 and the rest are scaled down to match it
+  const chosen = { red: CAL.values.red, green: CAL.values.green, blue: CAL.values.blue };
+  const peak = Math.max(chosen.red || 1, chosen.green || 1, chosen.blue || 1);
+  return { red: (chosen.red || 1) / peak, green: (chosen.green || 1) / peak,
+           blue: (chosen.blue || 1) / peak };
 }
 
-async function closeCalibration() {
-  CAL.active = false;
-  const done = await calCall({ action: "end" });
-  await reload();
-  toast(`Calibration finished${done.restored ? ` · ${done.restored} light(s) restored` : ""}`);
+function calBody() {
+  const step = calStep();
+  const body = { action: "apply", entity: CAL.entity, frame: step,
+                 brightness: CAL.values[step] };
+  if (step === "white" && CAL.kelvin) body.kelvin = CAL.kelvin;
+  return body;
 }
 
-function calStepLabel() {
-  const step = CAL.steps[CAL.index];
-  return `${step.frame} · ${step.level}`;
-}
-
-// The light must not chase every intermediate position: a drag is one intent. Debounce
-// the trailing edge, and if a send is already in flight remember that another value is
-// waiting so the final position always wins (the pipeline's own newest-frame rule).
 let CAL_TIMER = null, CAL_INFLIGHT = false, CAL_PENDING = false;
 const CAL_DEBOUNCE_MS = 220;
 
@@ -1556,19 +1533,12 @@ function calApply(immediate) {
 }
 
 async function calSend() {
-  const step = CAL.steps[CAL.index];
-  if (!step) return;
+  if (!CAL.active) return;
   if (CAL_INFLIGHT) { CAL_PENDING = true; return; }
   CAL_INFLIGHT = true;
-  const white = step.frame === "white";
-  const body = {
-    action: "apply", entity: CAL.entity, frame: step.frame, level: step.level,
-    hue: white ? 0 : CAL.hue, chroma: white ? 1.0 : CAL.chroma,
-    warmth: white ? CAL.warmth : 0.0, level_scale: CAL.level,
-  };
   let out;
   try {
-    out = await calCall(body);
+    out = await calCall(calBody());
   } finally {
     CAL_INFLIGHT = false;
     if (CAL_PENDING) { CAL_PENDING = false; calApply(true); return; }
@@ -1576,78 +1546,119 @@ async function calSend() {
   const sent = document.getElementById("cal-sent");
   if (sent) {
     sent.textContent = out.ok
-      ? `sent ${out.mode === "color_temp" ? out.kelvin + "K" : out.adjusted}`
-        + ` · brightness ${out.brightness}`
+      ? (out.mode === "color_temp"
+          ? `sent ${out.kelvin}K at brightness ${out.brightness}`
+          : `sent ${out.reference} at brightness ${out.brightness}`)
       : "send failed: " + (out.error || "unknown");
   }
 }
 
+async function openCalibration() {
+  const mapped = LIGHTS.map((l) => l.entity.trim()).filter(Boolean);
+  if (!mapped.length) { toast("Pick a light first", true); return; }
+  CAL.queue = mapped;
+  CAL.qindex = 0;
+  CAL.active = false;
+  if (!(await calEnter(CAL.queue[0]))) return;
+  CAL.active = true;
+  renderCalibration();
+}
+
+async function calEnter(entity) {
+  CAL.entity = entity;
+  CAL.index = 0;
+  CAL.values = calDefaults();
+  CAL.kelvin = null;
+  // start from this light's own stored points, not the previous lamp's
+  const known = (CAL_CURRENT || {})[entity] || {};
+  CAL_STEPS.forEach((frame) => {
+    if (known[frame] != null) CAL.values[frame] = Math.round(Number(known[frame]));
+  });
+  CAL.white_scale = Number(known.white_scale || 1);
+  if (known.cap_red != null && known.cap_green != null && known.cap_blue != null) {
+    // keep the ratios, expressed on the 1-255 scale the sliders use
+    const peak = Math.max(known.cap_red, known.cap_green, known.cap_blue) || 1;
+    CAL.values.red = Math.round(255 * known.cap_red / peak);
+    CAL.values.green = Math.round(255 * known.cap_green / peak);
+    CAL.values.blue = Math.round(255 * known.cap_blue / peak);
+  }
+  const started = await calCall({ action: CAL.active ? "switch" : "start", entity });
+  if (!started.ok) { toast("Calibration: " + started.error, true); return false; }
+  return true;
+}
+
+async function closeCalibration() {
+  CAL.active = false;
+  const done = await calCall({ action: "end" });
+  await reload();
+  toast(`Calibration finished${done.restored ? ` · ${done.restored} light(s) restored` : ""}`);
+}
+
 function renderCalibration() {
-  const step = CAL.steps[CAL.index];
-  const white = step.frame === "white";
+  const step = calStep();
   const host = $("settings");
-  const slider = (id, label, min, max, value, stepSize) => `
+  const slider = (id, label, min, max, value) => `
     <div class="row"><div><div class="label">${label}</div></div>
       <div class="ctl"><input type="range" id="${id}" min="${min}" max="${max}"
-        step="${stepSize}" value="${value}"><input type="number" id="${id}-n"
-        min="${min}" max="${max}" step="${stepSize}" value="${value}"></div></div>`;
+        step="1" value="${value}"><input type="number" id="${id}-n"
+        min="${min}" max="${max}" step="1" value="${value}"></div></div>`;
+  const patch = `rgb(${CAL_FRAMES[step].join(",")})`;
   host.innerHTML = `
     <div class="card" id="calibration">
       <h2>Calibrate ${esc(CAL.entity)}</h2>
       <div class="body">
         <div class="banner" style="border-color:rgba(210,153,34,.5);background:rgba(210,153,34,.08);color:#e3b341">
           Turn off Windows Night Light and HDR first, and judge with the room lit the way
-          you normally use it — otherwise you are matching to a distorted reference.
-          Other lights are switched off while you work; they come back when you finish.
+          you normally use it. The other lights are switched off while you work; they come
+          back when you finish.
         </div>
         <div style="display:flex;gap:16px;align-items:center;margin:12px 0">
           <div style="flex:0 0 120px;height:120px;border-radius:10px;border:1px solid var(--line);
-               background:${calReference(step)}" aria-label="reference colour"></div>
+               background:${patch}" aria-label="reference colour"></div>
           <div>
             <div class="mono" style="font-size:12px;color:var(--muted)">
-              light ${CAL.qindex + 1} of ${CAL.queue.length || 1} · step ${CAL.index + 1} of ${CAL.steps.length}
+              light ${CAL.qindex + 1} of ${CAL.queue.length || 1} · step ${CAL.index + 1} of ${CAL_STEPS.length}
+              · ${step}
             </div>
-            <div style="font-size:16px;margin:2px 0 6px">${calStepLabel()} — make the lamp match this patch</div>
-            <div class="mono" id="cal-sent" style="font-size:12px;color:var(--muted)">not sent yet</div>
+            <div style="margin-top:6px;max-width:46ch">${CAL_HELP[step] || ""}</div>
+            <div class="mono" id="cal-sent" style="margin-top:8px;font-size:12px"></div>
           </div>
         </div>
-        ${white ? slider("cal-level", "Brightness", 0.3, 1.6, CAL.level, 0.01)
-                  + slider("cal-warmth", "Warmth \u2212 cool, + warm", -1, 1, CAL.warmth, 0.02)
-                : slider("cal-hue", "Hue", -45, 45, CAL.hue, 1)
-                  + slider("cal-chroma", "Saturation", 0.4, 1.8, CAL.chroma, 0.01)
-                  + slider("cal-level", "Brightness", 0.3, 2.5, CAL.level, 0.01)}
-        <div class="actions" style="padding-top:10px">
+        ${slider("cal-level", "Brightness", 1, 255, CAL.values[step])}
+        ${step === "white" ? `
+          <div class="row"><div><div class="label">White temperature</div>
+            <div class="help">Left is warmer, right is cooler. Leave it alone if the
+            lamp's white already matches the screen.</div></div>
+            <div class="ctl"><input type="range" id="cal-kelvin" min="2000" max="9009"
+              step="50" value="${CAL.kelvin || 6500}"><input type="number" id="cal-kelvin-n"
+              min="2000" max="9009" step="50" value="${CAL.kelvin || 6500}"></div></div>` : ""}
+        <div class="actions" style="padding:10px 0 0">
           <button class="btn primary" id="cal-next" type="button">Looks right</button>
           <button class="btn" id="cal-skip" type="button">Skip</button>
           <button class="btn" id="cal-back" type="button">Back</button>
-          <button class="btn" id="cal-full" type="button">${CAL.mode === "full" ? "Quick pass (4)" : "Full calibration (12)"}</button>
           <button class="btn" id="cal-end" type="button">Finish</button>
-          <span class="mono" id="cal-status" style="font-size:12px"></span>
         </div>
       </div>
     </div>`;
 
-  const wire = (id, key) => {
+  const wireSlider = (id, onChange) => {
     const range = $(id), num = $(`${id}-n`);
     if (!range) return;
     const set = (v) => {
-      const n = Math.min(+range.max, Math.max(+range.min, +v));
-      CAL[key] = n; range.value = n; if (num) num.value = n; calApply();
+      const n = Math.min(+range.max, Math.max(+range.min, Math.round(+v)));
+      onChange(n); range.value = n; if (num) num.value = n; calApply();
     };
     range.oninput = () => set(range.value);
     if (num) num.onchange = () => set(num.value);
   };
-  wire("cal-hue", "hue");
-  wire("cal-chroma", "chroma");
-  wire("cal-level", "level");
-  wire("cal-warmth", "warmth");
+  wireSlider("cal-level", (v) => { CAL.values[calStep()] = v; });
+  wireSlider("cal-kelvin", (v) => { CAL.kelvin = v; });
 
   $("cal-next").onclick = async () => {
-    const body = {
-      action: "commit", entity: CAL.entity,
-      hue: white ? 0 : CAL.hue, chroma: white ? 1.0 : CAL.chroma,
-      warmth: white ? CAL.warmth : 0.0, level: CAL.level,
-    };
+    const body = { action: "commit", entity: CAL.entity,
+                   black: CAL.values.black, grey: CAL.values.grey, white: CAL.values.white,
+                   caps: calCaps() };
+    if (step === "white" && CAL.kelvin) body.kelvin = CAL.kelvin;
     const out = await calCall(body);
     if (!out.ok) { toast("Could not save: " + out.error, true); return; }
     advance();
@@ -1656,43 +1667,22 @@ function renderCalibration() {
   $("cal-back").onclick = () => {
     if (CAL.index > 0) { CAL.index -= 1; renderCalibration(); calApply(true); }
   };
-  $("cal-full").onclick = () => {
-    CAL.mode = CAL.mode === "full" ? "quick" : "full";
-    CAL.steps = calSteps(CAL.mode);
-    CAL.index = Math.min(CAL.index, CAL.steps.length - 1);
-    renderCalibration();
-  };
   $("cal-end").onclick = closeCalibration;
   CAL.busy = false;
-  calApply(true);                    // a new frame goes out at once
+  calApply(true);
 }
 
-function advance() {
-  if (CAL.index + 1 < CAL.steps.length) {
+async function advance() {
+  if (CAL.index + 1 < CAL_STEPS.length) {
     CAL.index += 1;
     renderCalibration();
     return;
   }
-  // this light is done: quick covers every light once, then the refinement pass does the
-  // same circuit again with dark and light frames
   if (CAL.qindex + 1 < CAL.queue.length) {
     CAL.qindex += 1;
     const next = CAL.queue[CAL.qindex];
     toast(`Next light: ${next}`);
     calEnter(next).then((ok) => { if (ok) renderCalibration(); else closeCalibration(); });
-    return;
-  }
-  if (CAL.mode === "quick") {
-    CAL.mode = "refine";
-    CAL.qindex = 0;
-    const done = CAL.steps.length;
-    toast(`Quick pass done over ${CAL.queue.length} light(s) — refining with dark and light frames`);
-    calEnter(CAL.queue[0]).then((ok) => {
-      if (!ok) { closeCalibration(); return; }
-      CAL.steps = calSteps("refine");
-      CAL.index = done;              // every step the quick pass did not cover
-      renderCalibration();
-    });
     return;
   }
   closeCalibration();
@@ -2951,19 +2941,65 @@ def plan_white_mode(entity: str, colour: dict, now: float) -> tuple[bool, float]
     return (bool(state["cct"]) and neutral), kelvin
 
 
+def calibrated_brightness(luminance: float, cal: dict) -> int | None:
+    """Brightness from the three measured points, or None when they are not all set.
+
+    Interpolated in luminance^(1/3), close to how level is perceived, so a lamp that is
+    non-linear between black and 50% grey does not get a kink at the middle.
+    """
+    points = [(CALIBRATION_LEVEL_LUMINANCE[key], cal.get(key))
+              for key in ("black", "grey", "white")]
+    if any(value is None for _y, value in points):
+        return None
+    anchors = [(max(0.0, y) ** (1 / 3), float(b)) for y, b in points]
+    x = max(0.0, min(1.0, float(luminance))) ** (1 / 3)
+    previous = anchors[0]
+    for anchor in anchors[1:]:
+        x0, y0 = previous
+        x1, y1 = anchor
+        if x <= x1:
+            if x1 - x0 < 1e-9:
+                return int(round(max(1.0, min(255.0, y1))))
+            t = (x - x0) / (x1 - x0)
+            return int(round(max(1.0, min(255.0, y0 + t * (y1 - y0)))))
+        previous = anchor
+    return int(round(max(1.0, min(255.0, anchors[-1][1]))))
+
+
+def colour_cap(colour_xy, cal: dict) -> float:
+    """Scale for this frame so it does not outshine the other colours.
+
+    Each primary carries a measured factor; a frame between two primaries blends them by its
+    own RGB content, so the correction is continuous across the hue circle instead of
+    stepping at red, green and blue.
+    """
+    factors = [cal.get(key) for key in ("cap_red", "cap_green", "cap_blue")]
+    if any(value is None for value in factors):
+        return 1.0
+    channels = [max(0.0, float(c)) for c in render_rgb(colour_xy, 1.0)]
+    total = sum(channels)
+    if total < 1e-6:
+        return max(0.0, min(1.0, float(min(factors))))
+    blend = sum(c * float(f) for c, f in zip(channels, factors)) / total
+    return max(0.0, min(1.0, blend))
+
+
 def apply_calibration(colour: dict, cal: dict) -> dict:
     """Apply one light's calibration to its colour, in place."""
     if not cal:
         return colour
-    # warmth belongs to the white path: it is applied as a kelvin shift when the bulb
-    # has a colour-temperature channel, and as a locus shift only when white has to go
-    # out as xy. It must not tint a coloured frame.
-    warmth = float(cal.get("warmth", 0.0)) if colour.get("white") else 0.0
-    colour["xy"] = [round(v, 4) for v in calibrate_xy(
-        colour["xy"], float(cal.get("hue", 0.0)), float(cal.get("chroma", 1.0)), warmth)]
-    if warmth:
-        colour["warmth"] = warmth
-    colour["calibration_level"] = float(cal.get("level", 1.0))
+    # Hue and saturation are taken from the screen: what a light needs correcting on is
+    # level, white point, and how bright each colour can go.
+    level = calibrated_brightness(float(colour.get("luminance") or 0.0), cal)
+    if level is not None:
+        colour["calibration_brightness"] = level
+    if not colour.get("white"):          # caps describe coloured output; a grey is levelled
+        cap = colour_cap(tuple(colour["xy"]), cal)
+        if cap != 1.0:
+            colour["calibration_cap"] = cap
+    scale = float(cal.get("white_scale", 1.0))
+    if colour.get("white") and scale != 1.0:
+        colour["kelvin_scale"] = scale
     colour["rgb"] = srgb_from_xy(tuple(colour["xy"]), max(colour.get("luminance", 0.0), 1e-4))
     if "dominant" in colour:
         colour["dominant"] = colour["xy"]
@@ -2996,11 +3032,15 @@ def brightness_channel(colour: dict) -> float:
 
 
 def brightness_for_colour(colour: dict) -> int:
-    level = brightness_for_luminance(brightness_channel(colour))
-    scale = float(colour.get("calibration_level", 1.0))
-    if scale != 1.0:
-        level = int(round(max(1.0, min(255.0, level * scale))))
-    return level
+    measured = colour.get("calibration_brightness")
+    if measured is not None:
+        level = float(measured)             # the three measured points decide the response
+    else:
+        level = float(brightness_for_luminance(brightness_channel(colour)))
+    cap = float(colour.get("calibration_cap", 1.0))
+    if cap != 1.0:                           # ... and no colour outshines another
+        level *= max(0.0, min(1.0, cap))
+    return int(round(max(1.0, min(255.0, level))))
 
 
 def should_send(target: Target, colour: dict, brightness: int) -> bool:
@@ -3109,9 +3149,7 @@ def build_payload(colour: dict, entity: str = "", now: float | None = None) -> d
             time.perf_counter() if now is None else now)
     if use_cct:
         # the bulb's own white LEDs: warmer/cooler exactly, and no RGB mixing
-        warmth = float(colour.get("warmth") or 0.0)
-        if warmth:
-            kelvin *= 1.0 - WARMTH_KELVIN * warmth      # + is warmer, i.e. lower kelvin
+        kelvin *= float(colour.get("kelvin_scale") or 1.0)   # the measured white point
         caps = LIGHT_CAPS.get(entity or "", {})
         if not caps.get("cct"):              # range vanished under us: xy can do it
             use_cct = False
@@ -4414,12 +4452,17 @@ def load_calibration() -> None:
         return
     for entity, entry in (data or {}).items():
         if isinstance(entry, dict) and entity.startswith("light."):
-            CALIBRATION[entity] = {
-                "hue": float(entry.get("hue", 0.0) or 0.0),
-                "chroma": float(entry.get("chroma", 1.0) or 1.0),
-                "level": float(entry.get("level", 1.0) or 1.0),
-                "warmth": float(entry.get("warmth", 0.0) or 0.0),
-            }
+            record = {}
+            for key in ("black", "grey", "white", "cap_red", "cap_green", "cap_blue"):
+                if entry.get(key) is not None:
+                    record[key] = float(entry[key])
+            # 2.12 and earlier measured a warmth slider (-1..1); carry it across as the
+            # white-point scale it always meant, so an existing calibration still works
+            if entry.get("white_scale") is not None:
+                record["white_scale"] = float(entry["white_scale"]) or 1.0
+            elif entry.get("warmth") is not None:
+                record["white_scale"] = 1.0 - WARMTH_KELVIN * float(entry["warmth"] or 0.0)
+            CALIBRATION[entity] = record
 
 
 def save_calibration() -> bool:
@@ -4505,7 +4548,8 @@ def post_calibration(payload: Any = Body(...)):
                 stats.setdefault("calibration_errors", 0)
                 stats["calibration_errors"] += 1
         return {"ok": True, "solo": entity, "soloed": sorted(CALIBRATION_SESSION),
-                "frames": sorted(CALIBRATION_FRAMES), "levels": CALIBRATION_LEVELS}
+                "frames": list(CALIBRATION_FRAMES),
+                "start_brightness": CALIBRATION_START_BRIGHTNESS}
 
     if action == "switch":
         # move to the next light without re-capturing: the states saved at start are the
@@ -4529,57 +4573,61 @@ def post_calibration(payload: Any = Body(...)):
 
     if action == "apply":
         frame = str(payload.get("frame") or "white")
-        level = str(payload.get("level") or "mid")
         if frame not in CALIBRATION_FRAMES:
             return JSONResponse({"ok": False, "error": f"unknown frame {frame}"}, status_code=400)
-        rgb = _frame_colour(frame, level)
-        hue = float(payload.get("hue") or 0.0)
-        chroma = float(payload.get("chroma") or 1.0)
-        level_scale = float(payload.get("level_scale") or 1.0)
-        warmth = float(payload.get("warmth") or 0.0)
-        if frame == "white":
-            hue = 0.0                      # white only gets brightness and warm/cool
-            chroma = 1.0                   # scaling a neutral moves nothing; warmth does
-        xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma, warmth)
-        # The LEVEL is the brightness: dark/mid/light must be three different outputs.
-        # Deriving it from the frame's own luminance made red-dark and red-mid identical
-        # (a dim pure colour's luminance fell under the floor), so a step that should be
-        # brighter was sent at the same level. The level fraction is the intent; the
-        # brightness curve still shapes it.
-        level_fraction = float(CALIBRATION_BRIGHTNESS.get(level, 0.45))
-        colour = {"rgb": rgb, "xy": [round(xy[0], 4), round(xy[1], 4)],
-                  "luminance": max(0.01, min(1.0, level_scale * level_fraction)),
-                  "calibration_level": 1.0}
-        brightness = brightness_for_colour(colour)
-        # calibrating white has to tune the path the pipeline actually uses: the bulb's
-        # colour-temperature channel when it has one, xy otherwise. Otherwise the user
-        # matches one path and the program runs another.
+        try:
+            brightness = int(payload.get("brightness")
+                             or CALIBRATION_START_BRIGHTNESS.get(frame, 200))
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "brightness must be a number"},
+                                status_code=400)
+        brightness = max(1, min(255, brightness))
+        rgb = CALIBRATION_FRAMES[frame]
+        neutral = frame in ("black", "grey", "white")
+        # a neutral patch is shown and sent as the same chromaticity; the level is the
+        # brightness. A primary is sent at full chroma and its own brightness ceiling.
+        xy = tuple(D65_XY) if neutral else xy_from_rgb(rgb)
+        colour = {"rgb": list(rgb), "xy": [round(v, 4) for v in xy],
+                  "luminance": 1.0, "calibration_brightness": brightness}
         kelvin = None
         mode = "xy"
         caps = LIGHT_CAPS.get(entity, {})
-        if frame == "white" and caps.get("cct") and WHITE_MODE != "xy":
-            kelvin, _ = cct_from_xy(tuple(colour["xy"]))
-            kelvin *= 1.0 - WARMTH_KELVIN * warmth
+        if neutral and caps.get("cct") and WHITE_MODE != "xy":
+            wanted = payload.get("kelvin")
+            kelvin = float(wanted) if wanted else cct_from_xy(xy)[0]
             kelvin = max(caps["min_k"], min(caps["max_k"], kelvin))
             mode = "color_temp"
         sent = _send_now(entity, colour["xy"], brightness, kelvin)
-        preview = preview_colour(colour)
-        return {"ok": True, "sent": sent, "reference": "#%02x%02x%02x" % tuple(rgb),
-                "xy": colour["xy"], "brightness": brightness, "mode": mode,
+        return {"ok": True, "sent": sent, "frame": frame, "reference": "#%02x%02x%02x" % tuple(rgb),
+                "brightness": brightness, "mode": mode,
                 "kelvin": int(round(kelvin)) if kelvin else None,
-                "adjusted": preview["hex"], "saturation_k": preview["saturation_k"]}
+                "xy": colour["xy"]}
 
     if action == "commit":
-        hue = float(payload.get("hue") or 0.0)
-        chroma = float(payload.get("chroma") or 1.0)
-        level_scale = float(payload.get("level") or 1.0)
         if not entity.startswith("light."):
             return JSONResponse({"ok": False, "error": "entity must be a light"}, status_code=400)
-        CALIBRATION[entity] = {"hue": round(hue, 1), "chroma": round(chroma, 3),
-                               "level": round(level_scale, 3),
-                               "warmth": round(float(payload.get("warmth") or 0.0), 3)}
+        record = dict(CALIBRATION.get(entity) or {})
+        for key in ("black", "grey", "white"):
+            if payload.get(key) is not None:
+                record[key] = max(1.0, min(255.0, float(payload[key])))
+        if payload.get("white_scale") is not None:
+            record["white_scale"] = max(0.5, min(1.6, float(payload["white_scale"])))
+        if payload.get("kelvin") is not None:
+            # stored as a ratio against D65, so a warmer screen frame stays proportionally
+            # warmer: the light's own white point is a scale, not one fixed temperature
+            record["white_scale"] = max(0.5, min(1.6, float(payload["kelvin"]) / 6504.0))
+        caps = payload.get("caps") or {}
+        if isinstance(caps, dict):
+            for colour_name, key in (("red", "cap_red"), ("green", "cap_green"),
+                                     ("blue", "cap_blue")):
+                if caps.get(colour_name) is not None:
+                    record[key] = max(0.05, min(1.0, float(caps[colour_name]) / 255.0))
+        if not record:
+            return JSONResponse({"ok": False, "error": "nothing to record"},
+                                status_code=400)
+        CALIBRATION[entity] = record
         saved = save_calibration()
-        return {"ok": True, "saved": saved, "lights": CALIBRATION}
+        return {"ok": True, "saved": saved, "calibration": record, "lights": CALIBRATION}
 
     if action == "clear":
         if entity:

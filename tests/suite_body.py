@@ -1503,8 +1503,7 @@ assert abs(_red - 1.0) < 1e-6 and _green < 0.65 and _blue < 0.40, (_red, _green,
 # white is one of the four outputs being equalised: if it is judged dimmest, a white page
 # must not outshine the colour that was matched to it
 _cals = {"black": 70.0, "grey": 150.0, "white": 240.0,
-         "cap_white": 240 / 255, "cap_red": 200 / 255, "cap_green": 1.0,
-         "cap_blue": 120 / 255}
+         "cap_red": 200 / 240, "cap_green": 255 / 240, "cap_blue": 120 / 240}
 _seen_caps = {}
 for _name, _rgb in (("white", [255, 255, 255]), ("red", [255, 0, 0]),
                     ("green", [0, 255, 0]), ("blue", [0, 0, 255])):
@@ -1512,12 +1511,15 @@ for _name, _rgb in (("white", [255, 255, 255]), ("red", [255, 0, 0]),
           "white": _name == "white"}
     m.apply_calibration(_c, _cals)
     _seen_caps[_name] = (_c.get("calibration_cap", 1.0), m.brightness_for_colour(_c))
-assert _seen_caps["white"][0] < 1.0, (
-    f"a neutral frame must be capped when white is not the brightest: {_seen_caps}")
-assert _seen_caps["white"][1] <= _seen_caps["green"][1] + 1, (
-    f"white must not outshine the reference colour: {_seen_caps}")
-assert _seen_caps["green"][0] == 1.0, _seen_caps["green"]
-print(f"calibration ok: white joins the comparison - white {_seen_caps['white'][1]}, "
+# every judged value must come out exactly as judged, including one above white: dimming the
+# whole room to the strongest colour would mean nothing you set is what gets sent
+_judged = {"white": 240, "red": 200, "green": 255, "blue": 120}
+for _name, _value in _judged.items():
+    assert _seen_caps[_name][1] == _value, (
+        f"{_name} was judged {_value} but sent {_seen_caps[_name][1]}")
+assert "calibration_cap" not in {"white": 0} or _seen_caps["white"][0] == 1.0, (
+    "a neutral frame is the reference; it carries no cap")
+print(f"calibration ok: judged values are sent as judged - white {_seen_caps['white'][1]}, "
       f"green {_seen_caps['green'][1]}, red {_seen_caps['red'][1]}, blue {_seen_caps['blue'][1]}")
 
 # a hue between two primaries blends, so nothing steps at red/green/blue
@@ -1586,13 +1588,15 @@ try:
     _commit = m.post_calibration({"action": "commit", "entity": "light.cal",
                                   "black": 30, "grey": 140, "white": 235,
                                   "kelvin": 5800,
-                                  "caps": {"white": 235, "red": 255, "green": 160,
-                                           "blue": 100}})
+                                  "caps": {"red": 255 / 235, "green": 160 / 235,
+                                           "blue": 100 / 235}})
     assert _commit["ok"], _commit
     _rec = m.CALIBRATION["light.cal"]
     assert _rec["grey"] == 140 and abs(_rec["white_scale"] - 5800 / 6504) < 1e-4, _rec
-    assert abs(_rec["cap_green"] - 160 / 255) < 1e-4 and abs(_rec["cap_blue"] - 100 / 255) < 1e-4
-    assert abs(_rec.get("cap_white", 0) - 235 / 255) < 1e-4, _rec
+    assert abs(_rec["cap_green"] - (160 / 235)) < 1e-4, _rec
+    assert _rec["cap_red"] > 1.0, "a colour judged brighter than white is allowed above 1.0"
+    assert abs(_rec["cap_blue"] - (100 / 235)) < 1e-4, _rec
+    assert "cap_white" not in _rec, "white is the reference, so it carries no factor"
     # nothing to record only when there is no existing record to merge into
     assert m.post_calibration({"action": "commit", "entity": "light.nothing"}).status_code == 400
     print(f"calibration ok: the panel's calls send the chosen brightness and record "

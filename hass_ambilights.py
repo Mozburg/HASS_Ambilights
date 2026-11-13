@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.13.1"
+__version__ = "2.13.2"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1504,17 +1504,13 @@ function calDefaults() {
 function calStep() { return CAL_STEPS[CAL.index]; }
 
 function calCaps() {
-  // White is judged against the colours too: the four chosen brightnesses say which of them
-  // are equally bright, so whichever is strongest becomes 1.0 and the rest scale down. If
-  // white comes out dimmest, neutral frames are capped as well - a white page must not
-  // outshine the green that was just matched to it.
-  const chosen = { white: CAL.values.white, red: CAL.values.red,
-                   green: CAL.values.green, blue: CAL.values.blue };
-  const peak = Math.max(chosen.white || 1, chosen.red || 1, chosen.green || 1,
-                        chosen.blue || 1);
-  const out = {};
-  Object.keys(chosen).forEach((k) => { out[k] = (chosen[k] || 1) / peak; });
-  return out;
+  // White is the reference the level curve already produces, so each colour is expressed as a
+  // fraction of it - and a colour judged brighter than white is a value above 1. Dimming the
+  // whole room to the strongest colour instead would mean nothing you set is what gets sent.
+  const white = CAL.values.white || 1;
+  return { red: (CAL.values.red || 1) / white,
+           green: (CAL.values.green || 1) / white,
+           blue: (CAL.values.blue || 1) / white };
 }
 
 function calBody() {
@@ -2787,6 +2783,8 @@ def cells_for(target: Target, lin: np.ndarray, zone_cells: list[np.ndarray]) -> 
 # warm/cool LEDs render a white that RGB mixing cannot match. Everything coloured stays
 # xy. These thresholds are deliberately asymmetric (enter strict, leave loose) so a pale
 # scene cannot toggle the radio between two colour modes every frame.
+# how far a colour may be scaled relative to white; the final brightness is clamped to 255
+CAL_CAP_LIMIT = 2.0
 WHITE_DUV_LIMIT = 0.006        # furthest off the Planckian locus that still counts as
                                # white (D65 itself is +0.0033 - it is not on the locus)
 WHITE_ENTER_FRAMES = 3         # consecutive neutral frames before switching to kelvin
@@ -2984,9 +2982,11 @@ def colour_cap(colour_xy, cal: dict) -> float:
     channels = [max(0.0, float(c)) for c in render_rgb(colour_xy, 1.0)]
     total = sum(channels)
     if total < 1e-6:
-        return max(0.0, min(1.0, float(min(factors))))
+        return max(0.0, min(CAL_CAP_LIMIT, float(min(factors))))
     blend = sum(c * float(f) for c, f in zip(channels, factors)) / total
-    return max(0.0, min(1.0, blend))
+    # above 1.0 is legitimate: a colour judged brighter than white is a brighter command.
+    # The hardware limit is applied to the final brightness, not to the ratio.
+    return max(0.0, min(CAL_CAP_LIMIT, blend))
 
 
 def apply_calibration(colour: dict, cal: dict) -> dict:
@@ -2998,15 +2998,12 @@ def apply_calibration(colour: dict, cal: dict) -> dict:
     level = calibrated_brightness(float(colour.get("luminance") or 0.0), cal)
     if level is not None:
         colour["calibration_brightness"] = level
-    # A neutral frame is levelled and then scaled by the neutral's own factor: white and the
-    # three colours are judged against each other, so whichever is dimmest sets the ceiling
-    # for all four. Without this a white page outshines a green that was capped to match it.
-    if colour.get("white"):
-        cap = float(cal.get("cap_white", 1.0))
-    else:
+    # The neutral path IS the reference: the curve already lands on the white the user chose,
+    # so there is nothing to scale. Colours are expressed relative to that white.
+    if not colour.get("white"):
         cap = colour_cap(tuple(colour["xy"]), cal)
-    if cap != 1.0:
-        colour["calibration_cap"] = max(0.0, min(1.0, cap))
+        if cap != 1.0:
+            colour["calibration_cap"] = cap
     scale = float(cal.get("white_scale", 1.0))
     if colour.get("white") and scale != 1.0:
         colour["kelvin_scale"] = scale
@@ -3049,7 +3046,7 @@ def brightness_for_colour(colour: dict) -> int:
         level = float(brightness_for_luminance(brightness_channel(colour)))
     cap = float(colour.get("calibration_cap", 1.0))
     if cap != 1.0:                           # ... and no colour outshines another
-        level *= max(0.0, min(1.0, cap))
+        level *= max(0.0, min(CAL_CAP_LIMIT, cap))   # above 1 is legitimate: 255 clamps
     return int(round(max(1.0, min(255.0, level))))
 
 
@@ -4463,10 +4460,18 @@ def load_calibration() -> None:
     for entity, entry in (data or {}).items():
         if isinstance(entry, dict) and entity.startswith("light."):
             record = {}
-            for key in ("black", "grey", "white", "cap_white", "cap_red", "cap_green",
-                        "cap_blue"):
+            for key in ("black", "grey", "white", "cap_red", "cap_green", "cap_blue"):
                 if entry.get(key) is not None:
                     record[key] = float(entry[key])
+            # 2.13.1 stored factors normalised to the peak of all four, so white carried a
+            # factor below 1 and every colour was divided by it. Re-express them relative to
+            # white, which is the reference the curve already produces.
+            old_white = entry.get("cap_white")
+            if old_white is not None and float(old_white or 1.0) not in (0.0, 1.0):
+                scale = float(old_white)
+                for key in ("cap_red", "cap_green", "cap_blue"):
+                    if record.get(key) is not None:
+                        record[key] = min(CAL_CAP_LIMIT, record[key] / scale)
             # 2.12 and earlier measured a warmth slider (-1..1); carry it across as the
             # white-point scale it always meant, so an existing calibration still works
             if entry.get("white_scale") is not None:
@@ -4629,10 +4634,11 @@ def post_calibration(payload: Any = Body(...)):
             record["white_scale"] = max(0.5, min(1.6, float(payload["kelvin"]) / 6504.0))
         caps = payload.get("caps") or {}
         if isinstance(caps, dict):
-            for colour_name, key in (("white", "cap_white"), ("red", "cap_red"),
-                                     ("green", "cap_green"), ("blue", "cap_blue")):
+            for colour_name, key in (("red", "cap_red"), ("green", "cap_green"),
+                                     ("blue", "cap_blue")):
                 if caps.get(colour_name) is not None:
-                    record[key] = max(0.05, min(1.0, float(caps[colour_name]) / 255.0))
+                    # already a ratio against white: 1.0 means "as bright as white"
+                    record[key] = max(0.05, min(CAL_CAP_LIMIT, float(caps[colour_name])))
         if not record:
             return JSONResponse({"ok": False, "error": "nothing to record"},
                                 status_code=400)

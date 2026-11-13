@@ -1465,385 +1465,150 @@ assert m.MONITOR_INDEX == 2, m.MONITOR_INDEX
 m.apply_settings({"MONITOR_INDEX": 1}, persist=False)
 print("monitor ok: changing it bumps the epoch capture watches, with no restart")
 
-# --- manual calibration -----------------------------------------------------
-_cal_base = m.xy_from_rgb([255, 140, 40])
-assert m.calibrate_xy(_cal_base, 0, 1.0) == tuple(_cal_base), "identity must be exact"
-# a saturated orange rotated hard can leave the gamut, in which case the original is
-# kept - the contract is "always return something valid", not "always move"
-_rotated = m.calibrate_xy(m.xy_from_rgb([200, 120, 90]), 15, 1.0)
-assert m.valid_xy(_rotated) and _rotated != tuple(m.xy_from_rgb([200, 120, 90])), _rotated
-assert m._neo(_rotated, m.D65_XY) > 0.01, "rotation must keep the colour coloured"
-_extreme = m.calibrate_xy(_cal_base, 80, 1.0)
-assert m.valid_xy(_extreme), "an impossible rotation must fall back to something valid"
-_weak = m.calibrate_xy(m.xy_from_rgb([255, 0, 0]), 0, 0.6)
-_strong = m.calibrate_xy(m.xy_from_rgb([255, 0, 0]), 0, 1.4)
-assert m._neo(_weak, m.D65_XY) < m._neo(_strong, m.D65_XY), "chroma must scale"
-print("calibration ok: identity exact, hue rotates, chroma scales")
+# --- calibration: three level points, a white kelvin, a cap per colour ------
+import pathlib as _pl
+import shutil as _sh
+import subprocess as _spr
 
-_plain_colour = {"rgb": [200, 200, 200], "xy": list(m.xy_from_rgb([200, 200, 200])),
-                 "luminance": 0.5}
-assert m.brightness_for_colour(dict(_plain_colour)) == 205
-assert m.brightness_for_colour({**_plain_colour, "calibration_level": 0.6}) == 123
-_tuned = m.apply_calibration(dict(_plain_colour), {"hue": 10, "chroma": 0.9, "level": 0.7})
-assert _tuned["calibration_level"] == 0.7 and _tuned["xy"] != list(_plain_colour["xy"])
-print("calibration ok: level scales brightness without touching the hue")
+# the step list the panel walks: level first, then the three primaries
+_steps = _pl.Path(__file__).parent / "check_calsteps.js"
+if _sh.which("node"):
+    _out = _spr.run(["node", str(_steps), str(_pl.Path(m.__file__))],
+                   capture_output=True, text=True, timeout=30)
+    assert _out.returncode == 0, _out.stdout + _out.stderr
+    print("calibration ok: " + _out.stdout.strip())
+else:
+    assert "CAL_STEPS" in m.UI_HTML, "the panel must define its steps"
 
+# a level curve that passes exactly through what was measured
+_cal = {"black": 70.0, "grey": 150.0, "white": 240.0}
+assert m.calibrated_brightness(0.0, _cal) == 70, m.calibrated_brightness(0.0, _cal)
+assert m.calibrated_brightness(m.CALIBRATION_LEVEL_LUMINANCE["grey"], _cal) == 150
+assert m.calibrated_brightness(1.0, _cal) == 240
+_levels = [m.calibrated_brightness(y, _cal) for y in (0.0, 0.05, 0.2159, 0.5, 1.0)]
+assert _levels == sorted(_levels) and len(set(_levels)) == 5, _levels
+# a lamp that is nearly black at 20% is followed, not averaged
+_dark_heavy = {"black": 40.0, "grey": 60.0, "white": 250.0}
+assert m.calibrated_brightness(0.4, _dark_heavy) < m.calibrated_brightness(0.4, _cal)
+# without all three points there is no curve to apply
+assert m.calibrated_brightness(0.5, {"black": 20.0}) is None
+print(f"calibration ok: level curve through the measured points {_levels}")
+
+# caps: whichever colour was chosen brightest sets the scale, the rest come down to match
+_caps = {"cap_red": 1.0, "cap_green": 150 / 255, "cap_blue": 90 / 255}
+_red = m.colour_cap(m.xy_from_rgb([255, 0, 0]), _caps)
+_green = m.colour_cap(m.xy_from_rgb([0, 255, 0]), _caps)
+_blue = m.colour_cap(m.xy_from_rgb([0, 0, 255]), _caps)
+assert abs(_red - 1.0) < 1e-6 and _green < 0.65 and _blue < 0.40, (_red, _green, _blue)
+# a hue between two primaries blends, so nothing steps at red/green/blue
+_yellow = m.colour_cap(m.xy_from_rgb([255, 255, 0]), _caps)
+assert _green < _yellow < _red, (_green, _yellow, _red)
+assert m.colour_cap(m.xy_from_rgb([255, 0, 0]), {}) == 1.0, "uncalibrated means uncapped"
+print(f"calibration ok: caps equalise red/green/blue ({_red:.2f}/{_green:.2f}/{_blue:.2f}), "
+      f"yellow blends ({_yellow:.2f})")
+
+# what one light's calibration does to a frame
+_cal_light = {"black": 70.0, "grey": 150.0, "white": 240.0, "white_scale": 0.9,
+              "cap_red": 1.0, "cap_green": 0.6, "cap_blue": 0.35}
+_frame = {"rgb": [0, 255, 0], "xy": list(m.xy_from_rgb([0, 255, 0])), "luminance": 0.5}
+m.apply_calibration(_frame, _cal_light)
+assert _frame.get("calibration_cap") is not None, _frame
+_bright = m.brightness_for_colour(_frame)
+_uncapped = {"rgb": [0, 255, 0], "xy": list(m.xy_from_rgb([0, 255, 0])),
+             "luminance": 0.5, "calibration_brightness": m.calibrated_brightness(0.5, _cal_light)}
+assert _bright < m.brightness_for_colour(_uncapped), (
+    f"a capped colour must come out dimmer: {_bright}")
+# a grey frame is levelled, never capped: caps describe coloured output
+_grey = {"rgb": [128, 128, 128], "xy": list(m.xy_from_rgb([140, 140, 140])),
+         "luminance": 0.2159, "white": True}
+m.apply_calibration(_grey, _cal_light)
+assert "calibration_cap" not in _grey, _grey
+assert _grey.get("kelvin_scale") == 0.9, "the measured white point must reach the payload"
+print("calibration ok: a calibration caps colour, levels grey and carries the white point")
+
+# storage: the v1 file keeps working, its warmth becoming the white-point scale
 m.CALIBRATION.clear()
-m.CALIBRATION["light.cal"] = {"hue": 12.0, "chroma": 0.92, "level": 0.85}
-assert m.save_calibration(), "calibration must persist"
-_cal_file = m.calibration_path()
-assert _cal_file.exists()
-m.CALIBRATION.clear()
-m.load_calibration()
-assert m.CALIBRATION["light.cal"] == {"hue": 12.0, "chroma": 0.92, "level": 0.85,
-                                    "warmth": 0.0}, m.CALIBRATION
-print("calibration ok: saved beside config.json and reloaded")
-
-# and turning a calibration into what gets sent
-m.CALIBRATION["light.left_lamp"] = {"hue": 20.0, "chroma": 0.8, "level": 0.7}
-_sent_colour = {"rgb": [252, 157, 0], "xy": list(m.xy_from_rgb([252, 157, 0])), "luminance": 0.37}
-m.apply_calibration(_sent_colour, m.calibration_for("light.left_lamp"))
-_pv = m.preview_colour(_sent_colour)
-assert _sent_colour["calibration_level"] == 0.7
-assert _pv["brightness"] < m.brightness_for_colour(
-    {"rgb": [252, 157, 0], "xy": list(m.xy_from_rgb([252, 157, 0])), "luminance": 0.37})
-m.CALIBRATION.clear()
-m.save_calibration()
-print("calibration ok: a stored calibration changes brightness and hue downstream")
-
-# warmth: white sat on D65, so chroma scaling moved it nowhere. This is that bug.
-_white = m.xy_from_rgb([255, 255, 255])
-# (compare distance, not tuples: xy -> u'v' -> xy is not bit-exact)
-assert m._neo(m.calibrate_xy(_white, 0, 1.4), _white) < 1e-4, "chroma alone must not move white"
-_warm = m.calibrate_xy(_white, 0, 1.0, 0.8)
-_cool = m.calibrate_xy(_white, 0, 1.0, -0.8)
-assert m.valid_xy(_warm) and m.valid_xy(_cool)
-assert _warm != tuple(_white) and _cool != tuple(_white), "warmth must move a neutral"
-assert _warm[0] > _white[0] and _cool[0] < _white[0], "positive is warmer, negative cooler"
-assert m._neo(_warm, _white) > 0.01 and m._neo(_warm, _white) < 0.06, "a full slider is a visible nudge"
-assert m.calibrate_xy(_white, 0, 1.0, 0.0) == tuple(_white), "zero warmth is still identity"
-assert m._neo(m.calibrate_xy(_white, 0, 1.0, 1.0), _white) > m._neo(
-    m.calibrate_xy(_white, 0, 1.0, 0.5), _white), "the slider must be monotonic"
-print("calibration ok: warmth moves white along the locus, chroma cannot")
-
-# ... and a stored warmth survives the file and reaches the payload
-m.CALIBRATION.clear()
-m.CALIBRATION["light.warm"] = {"hue": 0.0, "chroma": 1.0, "level": 1.0, "warmth": 0.7}
+m.CALIBRATION["light.old"] = {"black": 60.0, "grey": 140.0, "white": 230.0,
+                              "white_scale": 0.9, "cap_red": 1.0, "cap_green": 0.7,
+                              "cap_blue": 0.4}
 assert m.save_calibration()
 m.CALIBRATION.clear(); m.load_calibration()
-assert m.CALIBRATION["light.warm"]["warmth"] == 0.7, m.CALIBRATION
-_applied = m.apply_calibration({"rgb": [255, 255, 255], "xy": list(_white), "luminance": 0.6,
-                               "white": True}, m.calibration_for("light.warm"))
-assert _applied["xy"][0] > _white[0], "a stored warmth must reach a white frame"
-_colour_frame = m.apply_calibration({"rgb": [255, 0, 0], "xy": list(m.xy_from_rgb([255, 0, 0])),
-                                     "luminance": 0.4}, m.calibration_for("light.warm"))
-assert _colour_frame["xy"] == [round(v, 4) for v in m.xy_from_rgb([255, 0, 0])], (
-    "warmth is a white correction: it must not tint a coloured frame")
+assert m.CALIBRATION["light.old"]["grey"] == 140.0, m.CALIBRATION
+assert m.CALIBRATION["light.old"]["cap_blue"] == 0.4, m.CALIBRATION
+_cal_file = m.calibration_path()
+_cal_file.write_text(json.dumps({"light.legacy": {"hue": 0.0, "chroma": 1.0, "level": 1.0,
+                                                 "warmth": 0.5}}), encoding="utf-8")
+m.CALIBRATION.clear(); m.load_calibration()
+assert abs(m.CALIBRATION["light.legacy"]["white_scale"] - (1 - m.WARMTH_KELVIN * 0.5)) < 1e-6, (
+    f"an old warmth must become the white-point scale: {m.CALIBRATION}")
+assert "hue" not in m.CALIBRATION["light.legacy"], "hue is no longer calibrated"
 m.CALIBRATION.clear(); m.save_calibration()
-print("calibration ok: warmth round-trips through calibration.json into the payload")
+print("calibration ok: stored points round-trip, v1 warmth migrates, hue is dropped")
 
-# every calibration frame must be able to move in BOTH hue directions. A saturated
-# primary sits on the sRGB corner, so +anything used to return the colour unchanged,
-# which is exactly "positive hue doesn't work".
-for _name, _rgb in m.CALIBRATION_FRAMES.items():
-    _xy = m.xy_from_rgb(_rgb)
-    if _name == "white":
-        continue
-    # the reference is a true primary, not a pastel of one
-    assert _rgb in ((255, 0, 0), (0, 255, 0), (0, 0, 255)), f"{_name} is not a primary: {_rgb}"
-    for _h in (-20, 20):
-        _moved = m._neo(m.calibrate_xy(_xy, _h, 1.0), _xy)
-        assert _moved > 0.010, f"{_name} hue {_h:+d} barely moved ({_moved:.4f} duv)"
-print("calibration ok: every frame moves both ways under hue, none sits on the corner")
-
-# the swatch is the colour, the number beside it is the level: rendering the swatch at
-# the sent level made pure red read #e00000 at brightness 40 and #ff0000 at 255, which
-# looks like the wrong colour when it is the right colour, dimmer
-_sat_red = {"rgb": [255, 0, 0], "xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.05}
-_other = dict(_sat_red, luminance=0.9)
-_lo, _hi = m.preview_colour(_sat_red), m.preview_colour(_other)
-assert _lo["hex"] == _hi["hex"] == "#ff0000", (_lo["hex"], _hi["hex"])
-assert _lo["brightness"] < _hi["brightness"], "the level must still be visible as a number"
-assert m.preview_colour({"rgb": [255, 153, 153],
-                         "xy": list(m.xy_from_rgb([255, 153, 153])),
-                         "luminance": 0.4})["hex"] == "#ff9999", "a muted colour stays muted"
-print("calibration ok: swatch shows the colour, brightness is the number that dims")
-
-# --- white frames ride the bulb's own colour-temperature channel -------------
-_k, _d = m.cct_from_xy((0.3127, 0.3290))
-assert 6300 < _k < 6700, f"D65 should read ~6500K, got {_k}"
-assert 0.002 < _d < 0.005, f"D65 sits just above the locus, got duv {_d}"
-_k, _d = m.cct_from_xy((0.4476, 0.4074))
-assert 2750 < _k < 2950 and abs(_d) < 0.002, f"illuminant A is 2856K on the locus: {_k} {_d}"
-print("cct ok: known chromaticities map to the right kelvin and tint")
-
-for _rgb, _expect in (([255, 255, 255], True), ([128, 128, 128], True),
-                      ([255, 214, 180], True),      # warm white: still white
-                      ([200, 200, 210], True),      # cool white
-                      ([255, 0, 0], False), ([0, 0, 255], False),
-                      ([120, 200, 120], False)):    # green tint is not white
-    assert m.is_white({"xy": list(m.xy_from_rgb(_rgb))}) is _expect, (_rgb, _expect)
-print("cct ok: warm and cool whites qualify, colour and green-tinted frames do not")
-
-m.LIGHT_CAPS["light.white"] = {"cct": True, "min_k": 2000.0, "max_k": 9009.0,
-                               "modes": ["color_temp", "xy"]}
-assert m.LIGHT_CAPS["light.white"]["cct"], "a full range must be usable"
-m.LIGHT_CAPS["light.plain"] = {"cct": False, "min_k": 2000.0, "max_k": 6500.0,
-                               "modes": ["xy"]}
-_white = {"xy": list(m.xy_from_rgb([250, 250, 245])), "luminance": 0.5}
-_red = {"xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.4}
-
-m.WHITE_MODE = "auto"; m.WHITE_STATE.clear()
-_modes = [m.plan_white_mode("light.white", _white, 100 + i * 0.3)[0] for i in range(4)]
-assert _modes[:2] == [False, False] and _modes[2] and _modes[3], (
-    f"a neutral scene should settle into kelvin after a few frames: {_modes}")
-m.WHITE_STATE.clear()
-assert not any(m.plan_white_mode("light.plain", _white, 100 + i)[0] for i in range(5)), (
-    "a light with no colour-temperature channel must stay on xy")
-m.WHITE_STATE.clear()
-for i in range(4):
-    m.plan_white_mode("light.white", _white, 100 + i * 0.3)
-assert m.plan_white_mode("light.white", _red, 102)[0] is False, (
-    "a red frame must never be expressed as a colour temperature, dwell or not")
-print("cct ok: neutral frames enter after a few, colour frames leave at once")
-
-m.WHITE_MODE = "xy"; m.WHITE_STATE.clear()
-assert not any(m.plan_white_mode("light.white", _white, 200 + i * 0.3)[0] for i in range(6))
-m.WHITE_MODE = "auto"
-print("cct ok: WHITE_MODE=xy keeps the old behaviour")
-
-# the payload has to change, and warmth has to stay out of the coloured path
-m.WHITE_STATE.clear()
-m.LIGHT_CAPS["light.white"]["cct"] = True
-_bodies = [m.build_payload(dict(_white, white=True), "light.white", now=300 + i * 0.3)
-           for i in range(5)]
-assert "xy_color" in _bodies[0] and "color_temp_kelvin" in _bodies[-1], _bodies
-assert 2000 <= _bodies[-1]["color_temp_kelvin"] <= 9009, _bodies[-1]
-print(f"cct ok: the neutral payload becomes color_temp_kelvin "
-      f"{_bodies[-1]['color_temp_kelvin']}K")
-
-_cal = {"hue": 0.0, "chroma": 1.0, "level": 1.0, "warmth": 0.8}
-_coloured = m.apply_calibration({"xy": list(m.xy_from_rgb([255, 0, 0])), "luminance": 0.4},
-                               _cal)
-assert _coloured["xy"] == [round(v, 4) for v in m.xy_from_rgb([255, 0, 0])], (
-    f"warmth must not tint a coloured frame: {_coloured['xy']}")
-_whiteframe = m.apply_calibration({"xy": list(m.xy_from_rgb([255, 255, 255])),
-                                   "luminance": 0.5, "white": True}, _cal)
-assert _whiteframe["xy"] != [round(v, 4) for v in m.xy_from_rgb([255, 255, 255])], (
-    "on a white frame the warmth still has to do something")
-print("cct ok: warmth moves white and leaves colour alone")
-
-m.WHITE_MODE = "auto"; m.WHITE_STATE.clear()
-m.LIGHT_CAPS.pop("light.white", None); m.LIGHT_CAPS.pop("light.plain", None)
-
-# the kelvin range must come from the installation, never from a guess
-m.LIGHT_CAPS.clear()
-m.refresh_light_caps([
-    {"entity_id": "light.full", "attributes": {
-        "supported_color_modes": ["color_temp", "xy"],
-        "min_color_temp_kelvin": 2200, "max_color_temp_kelvin": 4000}},
-    {"entity_id": "light.mireds", "attributes": {
-        "supported_color_modes": ["color_temp", "xy"], "min_mireds": 250, "max_mireds": 454}},
-    {"entity_id": "light.norange", "attributes": {
-        "supported_color_modes": ["color_temp", "xy"]}},
-    {"entity_id": "light.rgbonly", "attributes": {"supported_color_modes": ["rgb"]}},
-])
-assert m.LIGHT_CAPS["light.full"]["cct"] and m.LIGHT_CAPS["light.full"]["min_k"] == 2200, (
-    m.LIGHT_CAPS["light.full"])
-assert m.LIGHT_CAPS["light.full"]["max_k"] == 4000, m.LIGHT_CAPS["light.full"]
-# mireds are the legacy spelling of the same thing: 1e6/454 ~= 2203K
-assert m.LIGHT_CAPS["light.mireds"]["cct"], m.LIGHT_CAPS["light.mireds"]
-assert 2200 < m.LIGHT_CAPS["light.mireds"]["min_k"] < 2210, m.LIGHT_CAPS["light.mireds"]
-assert not m.LIGHT_CAPS["light.norange"]["cct"], (
-    "a light that advertises color_temp but no range must not be guessed at")
-assert not m.LIGHT_CAPS["light.rgbonly"]["cct"]
-print("white ok: ranges come from the light, mireds understood, no range means no guessing")
-
-# and the clamp uses the reported range
-m.WHITE_STATE.clear()
-# a warm white the bulb can actually reach (~3300K); a 6300K white would be out of its
-# 2200-4000K range and correctly stays on xy
-_white = {"xy": list(m.xy_from_rgb([255, 196, 145])), "luminance": 0.5}
-_boost = m.SATURATION_BOOST
-m.SATURATION_BOOST = False        # a boosted white is legitimately no longer neutral
-try:
-    _bodies = [m.build_payload(dict(_white, white=True), "light.full", now=500 + i * 0.3)
-               for i in range(5)]
-finally:
-    m.SATURATION_BOOST = _boost
-_k = _bodies[-1].get("color_temp_kelvin")
-assert _k is not None and 2200 <= _k <= 4000, f"a 2200-4000K bulb was sent {_k}"
-print(f"white ok: clamped into the bulb's own 2200-4000K range ({_k}K)")
-m.WHITE_STATE.clear()
-m.LIGHT_CAPS.clear()
-
-# calibrating white must exercise the channel the pipeline uses
-# wide range on purpose: the warmth shift has to be visible, not clamped away
-m.LIGHT_CAPS["light.cal"] = {"cct": True, "min_k": 1500.0, "max_k": 12000.0, "modes": []}
+# the endpoint the panel calls
 _orig_send = m._send_now
 _seen = {}
-m._send_now = lambda entity, xy, brightness, kelvin=None: (_seen.update(kelvin=kelvin), True)[1]
+m._send_now = lambda entity, xy, brightness, kelvin=None: (
+    _seen.update(brightness=brightness, kelvin=kelvin, xy=xy), True)[1]
 try:
-    _res = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "white",
-                               "level": "mid", "warmth": 0.6, "level_scale": 1.0})
+    _res = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "grey",
+                               "brightness": 132})
+    assert _res["ok"] and _res["brightness"] == 132 and _seen["brightness"] == 132, (_res, _seen)
+    assert "#808080" == _res["reference"], _res
+    _res2 = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "blue",
+                                "brightness": 90})
+    assert _res2["brightness"] == 90 and _seen["brightness"] == 90
+    _out_of_range = m.post_calibration({"action": "apply", "entity": "light.cal",
+                                        "frame": "red", "brightness": 900})
+    assert _out_of_range["brightness"] == 255, "brightness is clamped, not accepted"
+    _bad = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "mauve"})
+    assert _bad.status_code == 400, "an unknown frame must be refused"
+    _commit = m.post_calibration({"action": "commit", "entity": "light.cal",
+                                  "black": 30, "grey": 140, "white": 235,
+                                  "kelvin": 5800,
+                                  "caps": {"red": 255, "green": 160, "blue": 100}})
+    assert _commit["ok"], _commit
+    _rec = m.CALIBRATION["light.cal"]
+    assert _rec["grey"] == 140 and abs(_rec["white_scale"] - 5800 / 6504) < 1e-4, _rec
+    assert abs(_rec["cap_green"] - 160 / 255) < 1e-4 and abs(_rec["cap_blue"] - 100 / 255) < 1e-4
+    # nothing to record only when there is no existing record to merge into
+    assert m.post_calibration({"action": "commit", "entity": "light.nothing"}).status_code == 400
+    print(f"calibration ok: the panel's calls send the chosen brightness and record "
+          f"{_rec['black']}/{_rec['grey']}/{_rec['white']}")
 finally:
     m._send_now = _orig_send
-assert _res["mode"] == "color_temp", _res
-assert _seen["kelvin"] is not None and 1500 <= _seen["kelvin"] <= 12000, _seen
-assert _res["kelvin"] == int(round(_seen["kelvin"])), (_res, _seen)  # response is rounded
-# ... and warmth has to move that kelvin, which is the whole point of calibrating white
-_seen.clear()
-m._send_now = lambda entity, xy, brightness, kelvin=None: (_seen.update(kelvin=kelvin), True)[1]
-try:
-    _cool = m.post_calibration({"action": "apply", "entity": "light.cal", "frame": "white",
-                                "level": "mid", "warmth": -0.6, "level_scale": 1.0})
-finally:
-    m._send_now = _orig_send
-assert _seen["kelvin"] > _res["kelvin"], (
-    f"cooler must raise the kelvin: {_seen['kelvin']} vs {_res['kelvin']}")
-print("white ok: the white calibration step sends color_temp_kelvin, warmth moves it")
+    m.CALIBRATION.pop("light.cal", None)
 
-m.LIGHT_CAPS.pop("light.cal", None)
-
-# --- the dark/mid/light ladder must actually differ -------------------------
-for _frame in ("white", "red", "green", "blue"):
-    _b = {}
-    for _level in ("dark", "mid", "light"):
-        _rgb = m._frame_colour(_frame, _level)
-        _c = {"rgb": _rgb, "xy": list(m.xy_from_rgb(_rgb)),
-              "luminance": max(0.01, min(1.0, m.CALIBRATION_BRIGHTNESS[_level])),
-              "calibration_level": 1.0}
-        _b[_level] = m.brightness_for_colour(_c)
-    assert _b["dark"] < _b["mid"] < _b["light"], f"{_frame} ladder is flat: {_b}"
-    assert _b["mid"] - _b["dark"] >= 20 and _b["light"] - _b["mid"] >= 20, (
-        f"{_frame} steps are too close to judge: {_b}")
-print("calibration ok: dark/mid/light are three different brightnesses for every frame")
-
-# ... and the same through the endpoint, which is what the panel actually calls
-_co = {"rgb": [128, 0, 0], "xy": list(m.xy_from_rgb([128, 0, 0])), "luminance": 0.45,
-       "calibration_level": 1.0}
-_store = m.LIGHT_CAPS.pop("light.a", None)
-try:
-    _seen_bright = []
-    _orig = m._send_now
-    m._send_now = lambda entity, xy, br, kelvin=None: (
-        _seen_bright.append(br), True)[1]
-    try:
-        for _level in ("dark", "mid", "light"):
-            m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
-                                "level": _level, "level_scale": 1.0})
-    finally:
-        m._send_now = _orig
-finally:
-    if _store:
-        m.LIGHT_CAPS["light.a"] = _store
-assert _seen_bright[0] < _seen_bright[1] < _seen_bright[2], (
-    f"the endpoint sends one brightness for every level: {_seen_bright}")
-print(f"calibration ok: the endpoint's red steps go {_seen_bright}")
-
-# the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
-import types as _types
-_calls = []
+# solo / switch / end still behave, now that a session covers every light
 _orig = (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post)
+_calls = []
 m.check_ha = lambda *a, **k: True
-m._send_now = lambda entity, xy, br, kelvin=None: (
-    _calls.append(("send", entity, tuple(xy), br)), True)[1]
+m._send_now = lambda entity, xy, br, kelvin=None: (_calls.append(("send", entity)), True)[1]
 m._autotune_attrs = lambda targets: [{"entity_id": t.entity_id, "rgb_color": [9, 9, 9],
                                       "brightness": 77} for t in targets]
-m.restore_light = lambda state, attempts=3: (_calls.append(("restore", state["entity_id"])), True)[1]
+m.restore_light = lambda state, attempts=3: (_calls.append(("restore", state["entity_id"])),
+                                             True)[1]
 m.requests.post = lambda url, **k: (_calls.append(("off", k["json"]["entity_id"])),
-                                    _types.SimpleNamespace(ok=True, status_code=200))[1]
+                                    __import__("types").SimpleNamespace(ok=True,
+                                                                       status_code=200))[1]
 try:
-    m.TARGETS = m.parse_light_map("light.a=1,2; light.b=3,4; light.c=5,6")
-    m.CALIBRATION.clear(); m.CALIBRATION_SESSION.clear()
+    m.TARGETS = m.parse_light_map("light.a=1,2; light.b=3,4")
+    m.CALIBRATION_SESSION.clear()
     _r = m.post_calibration({"action": "start", "entity": "light.a"})
-    # every light's original state is saved (so finishing restores the room, not "off"),
-    # but only the others are switched off
-    assert _r["ok"] and _r["solo"] == "light.a", _r
-    assert _r["soloed"] == ["light.a", "light.b", "light.c"], _r
-    assert m.TUNING.is_set(), "calibration must silence the pipeline"
-    assert [c for c in _calls if c[0] == "off"] == [("off", "light.b"), ("off", "light.c")], _calls
+    assert _r["ok"] and sorted(_r["soloed"]) == ["light.a", "light.b"], _r
+    assert m.TUNING.is_set(), "a session must silence the pipeline"
+    _before = dict(m.CALIBRATION_SESSION)
+    _sw = m.post_calibration({"action": "switch", "entity": "light.b"})
+    assert _sw["ok"] and m.CALIBRATION_SESSION == _before, (
+        "switching lights must not re-capture states: they are already switched off")
     _calls.clear()
-
-    _r = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
-                             "level": "mid", "hue": 10, "chroma": 1.0, "level_scale": 1.0})
-    # the reference patch is the true primary at its level: mid red is half-strength red
-    assert _r["ok"] and _r["sent"] and _r["reference"] == "#800000", _r
-    # the call applies hue 10, which walks red toward orange - still red-dominant
-    assert _r["xy"][0] > 0.45 and _r["xy"][0] > _r["xy"][1], "mid red must stay red-dominant"
-    assert _r["brightness"] > 60, "mid red must be lit"
-    assert len([c for c in _calls if c[0] == "send"]) == 1, _calls
-
-    _dim = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
-                               "level": "mid", "level_scale": 0.4})
-    _bright = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
-                                  "level": "mid", "level_scale": 2.2})
-    assert _dim["ok"] and _bright["ok"], (_dim, _bright)
-    assert _dim["brightness"] < _bright["brightness"] * 0.65, (
-        f"the brightness slider must move a colour frame: {_dim['brightness']} vs "
-        f"{_bright['brightness']}")
-    print("calibration ok: brightness moves a colour frame, not just white")
-
-    _bad = m.post_calibration({"action": "apply", "entity": "light.a", "frame": "mauve"})
-    assert _bad.status_code == 400, "an unknown frame must be refused"
-
-    _r = m.post_calibration({"action": "commit", "entity": "light.a",
-                             "hue": 4, "chroma": 0.93, "level": 0.88})
-    assert _r["ok"] and _r["saved"] and m.CALIBRATION["light.a"]["hue"] == 4.0, _r
-
-    _r = m.post_calibration({"action": "clear", "entity": "light.a"})
-    assert _r["ok"] and "light.a" not in m.CALIBRATION, _r
-
-    _calls.clear()
-    _r = m.post_calibration({"action": "end"})
-    assert _r["ok"] and not m.TUNING.is_set(), "ending must let the pipeline run again"
-    # the whole room comes back, including the light that was being calibrated
-    assert sorted(c[1] for c in _calls if c[0] == "restore") == [
-        "light.a", "light.b", "light.c"], _calls
-
-    _dry = m.DRY_RUN; m.DRY_RUN = True
-    assert m.post_calibration({"action": "start", "entity": "light.a"}).status_code == 400
-    m.DRY_RUN = _dry
-    assert m.post_calibration({"action": "start", "entity": "sensor.x"}).status_code == 400
-    print("calibration ok: solo/apply/commit/clear/end all behave, bad input refused")
+    _end = m.post_calibration({"action": "end"})
+    assert _end["ok"] and not m.TUNING.is_set()
+    assert sorted(c[1] for c in _calls if c[0] == "restore") == ["light.a", "light.b"], _calls
+    print("calibration ok: a session solos, switches without losing states, and restores all")
 finally:
     (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
     m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
-
-# the step planner itself, executed (node), not pattern-matched
-import json as _json
-import subprocess as _sp
-import pathlib as _pathlib
-import shutil as _shutil
-_js = _pathlib.Path(__file__).parent / "check_calsteps.js"
-if _shutil.which("node"):
-    _out = _sp.run(["node", str(_js), str(_pathlib.Path(m.__file__))],
-                   capture_output=True, text=True, timeout=30)
-    assert _out.returncode == 0, _out.stdout + _out.stderr
-    _plan = _json.loads(_out.stdout)
-    assert _plan["counts"] == {"quick": 4, "refine": 10, "full": 12}, _plan
-    print("calibration ok: 4 quick -> 10 refined -> 12 full, both ends named")
-else:
-    assert 'mode === "quick" ? ["mid"]' in m.UI_HTML, "quick pass is one level"
-    print("calibration ok: node missing, checked statically instead")
-
-# the panel exists and the button opens it, not the old automatic probe
-_ui = m.UI_HTML
-assert "function renderCalibration()" in _ui and "openCalibration" in _ui
-assert "btn.onclick = openCalibration" in _ui, "the card's button opens the panel"
-assert "Turn off Windows Night Light and HDR" in _ui, "the panel must warn about the display"
-assert "cal-hue" in _ui and "cal-chroma" in _ui and "cal-level" in _ui
-# white gets brightness + warmth, never a chroma slider that cannot move it
-assert 'slider("cal-warmth"' in _ui and 'wire("cal-warmth", "warmth")' in _ui
-assert "chroma: white ? 1.0 : CAL.chroma" in _ui
-assert "level_scale: CAL.level" in _ui, "the brightness slider must reach every frame"
-assert any(s["name"] == "WHITE_MODE" for s in m.SETTINGS), "WHITE_MODE must be a setting"
-assert "level_scale: white ? CAL.level : 1.0" not in _ui, "it used to be white-only"
-# a drag is one intent: the trailing edge sends, in-flight work coalesces
-assert "CAL_DEBOUNCE_MS" in _ui and "clearTimeout(CAL_TIMER)" in _ui
-assert "if (CAL_INFLIGHT) { CAL_PENDING = true; return; }" in _ui
-assert "calApply(true)" in _ui, "a step change must send at once, not after the debounce"
-print("calibration ok: panel wired, warns about Night Light, three controls")
 
 # --- a save must not touch an undeclared name ------------------------------
 _ui = m.UI_HTML

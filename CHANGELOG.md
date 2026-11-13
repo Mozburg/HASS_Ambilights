@@ -8,6 +8,31 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.13.0] — 2026-11-12
+
+### Changed
+- **Calibration measures a different set of things.** Hue and saturation are no longer
+  calibrated at all — the screen supplies them, and no one can judge "rotate red eight
+  degrees". Six steps per light instead, each one slider:
+
+  | step | measures |
+  |---|---|
+  | black, grey, white | the lamp's own level response, from three points rather than a gamma guess |
+  | white | also its colour temperature, stored as a ratio so a warmer frame stays proportionally warmer |
+  | red, green, blue | how hard each primary may be driven, so no colour outshines another |
+
+- The three primaries are compared **to each other**, not to the screen patch: whichever you
+  set brightest becomes the reference and the others scale down to match. A frame between two
+  primaries blends their factors, so the correction is continuous across the hue circle.
+- Grey frames are levelled but never capped — the caps describe coloured output.
+- Each light still keeps its own points, and the session still walks every mapped light.
+
+### Compatible
+- A calibration saved by 2.12 or earlier keeps working: its `warmth` becomes the white-point
+  ratio, and its hue/chroma settings are simply no longer applied. Nothing has to be redone
+  for the program to run; re-running the six steps is worth it, because the new model
+  measures level and per-colour output that the old one never touched.
+
 ## [2.12.0] — 2026-11-12
 
 ### Added

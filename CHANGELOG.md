@@ -8,6 +8,20 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.13.2] — 2026-11-12
+
+### Fixed
+- **The colours were normalised against the wrong reference.** The caps were divided by the
+  strongest of white/red/green/blue and clamped at 1.0, so whenever a colour was judged
+  brighter than white the *whole set* was dimmed and nothing reached the value that had been
+  set: white 240 / red 200 / green 255 / blue 120 came out as 226 / 188 / 240 / 113.
+  White is the reference now — the level curve already produces exactly the white value that
+  was chosen — and each colour is stored as a fraction of it, allowed above 1.0 when you
+  judged it brighter, with the lamp's own 255 as the only ceiling. The same four now go out
+  as 240 / 200 / 255 / 120, and the ratio holds at every level (at 10% white: 132 / 110 / 140).
+- The panel and the endpoint agreed on units: caps are ratios against white, not 0-255 values
+  divided twice.
+
 ## [2.13.1] — 2026-11-12
 
 ### Fixed

@@ -309,12 +309,17 @@ white_c, red_c, blue_c = colour_of((255, 255, 255)), colour_of((255, 0, 0)), col
 m.BRIGHTNESS_FROM = "luminance"
 lum_red, lum_blue = m.brightness_for_colour(red_c), m.brightness_for_colour(blue_c)
 assert m.brightness_for_colour(white_c) == 255
-assert lum_red < 80 and lum_blue < 40, (lum_red, lum_blue)
+# the curve replaced gamma: a saturated frame must stay clearly lit rather than collapsing,
+# and still sit below white
+assert 85 < lum_red < 205, f"red collapsed or clipped: {lum_red}"
+assert 55 < lum_blue < lum_red, f"blue collapsed or outshone red: {lum_blue} vs {lum_red}"
 
 m.BRIGHTNESS_FROM = "lstar"
 ls_white = m.brightness_for_colour(white_c)
 ls_red, ls_blue = m.brightness_for_colour(red_c), m.brightness_for_colour(blue_c)
-assert ls_red > lum_red * 1.5 and ls_blue > lum_blue * 2, (ls_red, ls_blue)
+# the channel picks where a frame lands on the curve; lstar lifts saturated colours
+assert ls_red >= lum_red and ls_blue >= lum_blue, (ls_red, ls_blue, lum_red, lum_blue)
+assert ls_white == 255, ls_white
 assert 0.45 < ls_red / ls_white < 0.7, ls_red
 
 m.BRIGHTNESS_FROM = "value"
@@ -1381,7 +1386,8 @@ _ui_src = m.UI_HTML
 assert "if (!z.length) return" in _ui_src, "empty zones must not serialise as all"
 assert "visible.has(k)" in _ui_src, "hidden legacy keys must not be saved back"
 assert "setDirty(!!data.unsaved, false)" in _ui_src, "hydrating must not fire a live POST"
-assert "function openCalibration()" in _ui_src, "the manual panel replaces the old probe"
+assert "async function openCalibration(flow)" in _ui_src, "the panel takes a flow"
+assert "calibrate-color" in _ui_src, "colour calibration has its own button"
 assert "api/calibrate" not in _ui_src, "the automatic probe is no longer in the page"
 print("ui ok: no empty-zone inflation, no hidden-key saves, no POST on load")
 
@@ -1480,7 +1486,9 @@ if _sh.which("node"):
 else:
     assert "CAL_STEPS" in m.UI_HTML, "the panel must define its steps"
 
-# a level curve that passes exactly through what was measured
+# a level curve that passes exactly through what was measured (the grey anchor moves with
+# the brightness channel, so pin the channel this section measures in)
+m.BRIGHTNESS_FROM = "luminance"
 _cal = {"black": 70.0, "grey": 150.0, "white": 240.0}
 assert m.calibrated_brightness(0.0, _cal) == 70, m.calibrated_brightness(0.0, _cal)
 assert m.calibrated_brightness(m.CALIBRATION_LEVEL_LUMINANCE["grey"], _cal) == 150

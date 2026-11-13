@@ -13,7 +13,6 @@
   "SEND_MODE": "xy",
   "SEND_BRIGHTNESS": true,
   "BRIGHTNESS_FROM": "lstar",
-  "BRIGHTNESS_GAMMA": 0.8,
   "ZONE_ROWS": 3,
   "ZONE_COLS": 3,
   "CAPTURE_FPS": 12.0,

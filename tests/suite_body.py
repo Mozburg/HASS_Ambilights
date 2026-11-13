@@ -1500,6 +1500,26 @@ _red = m.colour_cap(m.xy_from_rgb([255, 0, 0]), _caps)
 _green = m.colour_cap(m.xy_from_rgb([0, 255, 0]), _caps)
 _blue = m.colour_cap(m.xy_from_rgb([0, 0, 255]), _caps)
 assert abs(_red - 1.0) < 1e-6 and _green < 0.65 and _blue < 0.40, (_red, _green, _blue)
+# white is one of the four outputs being equalised: if it is judged dimmest, a white page
+# must not outshine the colour that was matched to it
+_cals = {"black": 70.0, "grey": 150.0, "white": 240.0,
+         "cap_white": 240 / 255, "cap_red": 200 / 255, "cap_green": 1.0,
+         "cap_blue": 120 / 255}
+_seen_caps = {}
+for _name, _rgb in (("white", [255, 255, 255]), ("red", [255, 0, 0]),
+                    ("green", [0, 255, 0]), ("blue", [0, 0, 255])):
+    _c = {"rgb": _rgb, "xy": list(m.xy_from_rgb(_rgb)), "luminance": 1.0,
+          "white": _name == "white"}
+    m.apply_calibration(_c, _cals)
+    _seen_caps[_name] = (_c.get("calibration_cap", 1.0), m.brightness_for_colour(_c))
+assert _seen_caps["white"][0] < 1.0, (
+    f"a neutral frame must be capped when white is not the brightest: {_seen_caps}")
+assert _seen_caps["white"][1] <= _seen_caps["green"][1] + 1, (
+    f"white must not outshine the reference colour: {_seen_caps}")
+assert _seen_caps["green"][0] == 1.0, _seen_caps["green"]
+print(f"calibration ok: white joins the comparison - white {_seen_caps['white'][1]}, "
+      f"green {_seen_caps['green'][1]}, red {_seen_caps['red'][1]}, blue {_seen_caps['blue'][1]}")
+
 # a hue between two primaries blends, so nothing steps at red/green/blue
 _yellow = m.colour_cap(m.xy_from_rgb([255, 255, 0]), _caps)
 assert _green < _yellow < _red, (_green, _yellow, _red)
@@ -1566,11 +1586,13 @@ try:
     _commit = m.post_calibration({"action": "commit", "entity": "light.cal",
                                   "black": 30, "grey": 140, "white": 235,
                                   "kelvin": 5800,
-                                  "caps": {"red": 255, "green": 160, "blue": 100}})
+                                  "caps": {"white": 235, "red": 255, "green": 160,
+                                           "blue": 100}})
     assert _commit["ok"], _commit
     _rec = m.CALIBRATION["light.cal"]
     assert _rec["grey"] == 140 and abs(_rec["white_scale"] - 5800 / 6504) < 1e-4, _rec
     assert abs(_rec["cap_green"] - 160 / 255) < 1e-4 and abs(_rec["cap_blue"] - 100 / 255) < 1e-4
+    assert abs(_rec.get("cap_white", 0) - 235 / 255) < 1e-4, _rec
     # nothing to record only when there is no existing record to merge into
     assert m.post_calibration({"action": "commit", "entity": "light.nothing"}).status_code == 400
     print(f"calibration ok: the panel's calls send the chosen brightness and record "

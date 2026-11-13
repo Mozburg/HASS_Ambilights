@@ -8,6 +8,17 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.13.1] — 2026-11-12
+
+### Fixed
+- **A neutral frame could outshine a coloured one.** The caps normalised red, green and blue
+  against each other and left the neutral path alone, so if you judged white dimmer than
+  green, a white page was still sent at full white brightness — brighter than the green that
+  had just been capped to match it. White now joins the same comparison: all four outputs are
+  normalised, whichever is brightest becomes the reference, and a neutral frame carries its
+  own factor. Measured on one light: white 226, green 240, red 188, blue 113; when white is
+  the brightest, it is 240 and the colours come down around it.
+
 ## [2.13.0] — 2026-11-12
 
 ### Changed

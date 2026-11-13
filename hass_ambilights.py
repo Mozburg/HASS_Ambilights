@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.13.0"
+__version__ = "2.13.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -1504,12 +1504,17 @@ function calDefaults() {
 function calStep() { return CAL_STEPS[CAL.index]; }
 
 function calCaps() {
-  // the three chosen brightnesses say which colours are equally bright; normalise so the
-  // strongest one is 1.0 and the rest are scaled down to match it
-  const chosen = { red: CAL.values.red, green: CAL.values.green, blue: CAL.values.blue };
-  const peak = Math.max(chosen.red || 1, chosen.green || 1, chosen.blue || 1);
-  return { red: (chosen.red || 1) / peak, green: (chosen.green || 1) / peak,
-           blue: (chosen.blue || 1) / peak };
+  // White is judged against the colours too: the four chosen brightnesses say which of them
+  // are equally bright, so whichever is strongest becomes 1.0 and the rest scale down. If
+  // white comes out dimmest, neutral frames are capped as well - a white page must not
+  // outshine the green that was just matched to it.
+  const chosen = { white: CAL.values.white, red: CAL.values.red,
+                   green: CAL.values.green, blue: CAL.values.blue };
+  const peak = Math.max(chosen.white || 1, chosen.red || 1, chosen.green || 1,
+                        chosen.blue || 1);
+  const out = {};
+  Object.keys(chosen).forEach((k) => { out[k] = (chosen[k] || 1) / peak; });
+  return out;
 }
 
 function calBody() {
@@ -2993,10 +2998,15 @@ def apply_calibration(colour: dict, cal: dict) -> dict:
     level = calibrated_brightness(float(colour.get("luminance") or 0.0), cal)
     if level is not None:
         colour["calibration_brightness"] = level
-    if not colour.get("white"):          # caps describe coloured output; a grey is levelled
+    # A neutral frame is levelled and then scaled by the neutral's own factor: white and the
+    # three colours are judged against each other, so whichever is dimmest sets the ceiling
+    # for all four. Without this a white page outshines a green that was capped to match it.
+    if colour.get("white"):
+        cap = float(cal.get("cap_white", 1.0))
+    else:
         cap = colour_cap(tuple(colour["xy"]), cal)
-        if cap != 1.0:
-            colour["calibration_cap"] = cap
+    if cap != 1.0:
+        colour["calibration_cap"] = max(0.0, min(1.0, cap))
     scale = float(cal.get("white_scale", 1.0))
     if colour.get("white") and scale != 1.0:
         colour["kelvin_scale"] = scale
@@ -4453,7 +4463,8 @@ def load_calibration() -> None:
     for entity, entry in (data or {}).items():
         if isinstance(entry, dict) and entity.startswith("light."):
             record = {}
-            for key in ("black", "grey", "white", "cap_red", "cap_green", "cap_blue"):
+            for key in ("black", "grey", "white", "cap_white", "cap_red", "cap_green",
+                        "cap_blue"):
                 if entry.get(key) is not None:
                     record[key] = float(entry[key])
             # 2.12 and earlier measured a warmth slider (-1..1); carry it across as the
@@ -4618,8 +4629,8 @@ def post_calibration(payload: Any = Body(...)):
             record["white_scale"] = max(0.5, min(1.6, float(payload["kelvin"]) / 6504.0))
         caps = payload.get("caps") or {}
         if isinstance(caps, dict):
-            for colour_name, key in (("red", "cap_red"), ("green", "cap_green"),
-                                     ("blue", "cap_blue")):
+            for colour_name, key in (("white", "cap_white"), ("red", "cap_red"),
+                                     ("green", "cap_green"), ("blue", "cap_blue")):
                 if caps.get(colour_name) is not None:
                     record[key] = max(0.05, min(1.0, float(caps[colour_name]) / 255.0))
         if not record:

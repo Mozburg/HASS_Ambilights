@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.13.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.13.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -197,10 +197,13 @@ Press **Calibrate…** and you get six steps per light, one slider at a time:
 
 Why those three: a bulb's **level response** is not the gamma curve of a monitor, its
 **white** often leans warm or cool, and its **maximum output varies by colour** — red at full
-power can be half the apparent brightness of green at full power. The primaries are compared
-to *each other*, not to the patch, because "as bright as the other colours" is the judgement
-a person can actually make. Whichever colour you set brightest becomes the reference and the
-others are scaled down to match, so no colour outshines another.
+power can be half the apparent brightness of green at full power.
+
+**White and the three primaries are compared to each other**, not to the patch, because
+"as bright as the other colours" is the judgement a person can actually make. Whichever of
+the four you set brightest becomes the reference and the other three scale down to match, so
+nothing outshines anything — including a white page, which is capped too when it comes out
+dimmer than a colour.
 
 **It runs per light**, because two lamps of the same model are not the same lamp: press
 Calibrate once and the panel walks every mapped light (`light 2 of 3`), soloing each one —

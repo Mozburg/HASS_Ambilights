@@ -1,13 +1,21 @@
-// Runs the panel's own step list out of the embedded UI, so the order is checked as data.
+// Checks the panel's two calibration flows and their order, straight out of the UI source.
 const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8");
-const match = src.match(/const CAL_STEPS = \[([^\]]+)\]/);
-if (!match) { console.error("CAL_STEPS not found"); process.exit(1); }
-const steps = match[1].split(",").map((s) => s.trim().replace(/^["']|["']$/g, ""));
-const want = ["black", "grey", "white", "red", "green", "blue"];
-const ok = steps.length === want.length && want.every((w, i) => steps[i] === w)
-  && src.includes("const CAL_FRAMES = { black: [0, 0, 0]")
-  && src.includes("calCaps")          // the caps are computed from the chosen brightnesses
-  && !src.includes("calSteps(");      // the old 4/10/12 planner is gone
-if (!ok) { console.error(JSON.stringify(steps)); process.exit(1); }
-console.log(`steps ${steps.join(" -> ")}`);
+
+const flows = {};
+const block = src.match(/const CAL_FLOWS = \{([\s\S]*?)\};/);
+if (!block) { console.error("CAL_FLOWS not found"); process.exit(1); }
+for (const m of block[1].matchAll(/(\w+):\s*\[([^\]]*)\]/g)) {
+  flows[m[1]] = m[2].split(",").map((s) => s.trim().replace(/^["']|["']$/g, ""));
+}
+
+const want = { level: ["black", "grey", "white"], colour: ["red", "green", "blue"] };
+let ok = Object.keys(want).every((k) =>
+  flows[k] && flows[k].length === want[k].length && want[k].every((s, i) => flows[k][i] === s));
+ok = ok
+  && src.includes("calibrate-color")            // both buttons exist
+  && !src.includes("calSteps(")                 // the old 4/10/12 planner is gone
+  && src.includes("if (CAL.flow === \"level\")")  // a flow commits only its own points
+
+if (!ok) { console.error(JSON.stringify(flows)); process.exit(1); }
+console.log(`flows ${Object.entries(flows).map(([k, v]) => `${k}: ${v.join(" -> ")}`).join(" | ")}`);

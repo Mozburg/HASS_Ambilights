@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.13.2"
+__version__ = "2.14.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -293,7 +293,6 @@ SEND_BRIGHTNESS = _env("SEND_BRIGHTNESS", "1") == "1"
 # colour emits less luminous flux, so `value` is the only mode that keeps
 # apparent room brightness constant across hues.
 BRIGHTNESS_FROM = _env("BRIGHTNESS_FROM", "lstar")   # luminance | lstar | value
-BRIGHTNESS_GAMMA = float(_env("BRIGHTNESS_GAMMA", "0.8"))
 # auto: neutral frames ride the bulb's colour-temperature channel, colour stays xy.
 # color_temp: neutral frames only. xy: never (the old behaviour, in every mode).
 WHITE_MODE = _env("WHITE_MODE", "auto")
@@ -408,6 +407,10 @@ CALIBRATION_FRAMES = {
 # linear luminance each level patch stands for: 0, 50% grey, full white. These are the
 # x values of the three measured points.
 CALIBRATION_LEVEL_LUMINANCE = {"black": 0.0, "grey": 0.2159, "white": 1.0}
+# 50% grey expressed in each brightness channel, so the anchors sit where the patch is
+CALIBRATION_GREY_ANCHOR = {"luminance": 0.2159, "lstar": 0.53, "value": 0.5}
+# what an uncalibrated light uses: the identity curve. This replaced BRIGHTNESS_GAMMA.
+CAL_DEFAULT_CURVE = {"black": 0.0, "grey": 128.0, "white": 255.0}
 # where the brightness slider starts for each step; the user moves it until it matches
 CALIBRATION_START_BRIGHTNESS = {"black": 20, "grey": 150, "white": 240,
                                 "red": 200, "green": 200, "blue": 200}
@@ -1066,7 +1069,8 @@ function calibrationResults() {
   const help = document.createElement("div");
   help.className = "help";
   help.textContent = rows.length
-    ? "These offsets are applied to everything those lights are sent."
+    ? "Curve is black/grey/white brightness; colour is how far red/green/blue may go "
+      + "relative to white."
     : "Calibrate… walks you through matching each light to a reference patch on screen.";
   wrap.appendChild(help);
   rows.sort(([a], [b]) => a.localeCompare(b)).forEach(([entity, cal]) => {
@@ -1076,8 +1080,18 @@ function calibrationResults() {
     name.textContent = CSS.escape ? entity : entity;
     const values = document.createElement("span");
     values.className = "calvalues";
-    values.textContent = `hue ${(+cal.hue).toFixed(0)}° · sat ${(+cal.chroma).toFixed(2)}`
-      + ` · level ${(+cal.level).toFixed(2)}`;
+    const parts = [];
+    if (cal.black != null || cal.grey != null || cal.white != null) {
+      parts.push(`curve ${cal.black ?? "—"}/${cal.grey ?? "—"}/${cal.white ?? "—"}`);
+    }
+    if (cal.white_scale != null && Math.abs(cal.white_scale - 1) > 0.001) {
+      parts.push(`white ${Math.round(6504 * cal.white_scale)}K`);
+    }
+    if (cal.cap_red != null || cal.cap_green != null || cal.cap_blue != null) {
+      const pct = (v) => (v == null ? "—" : Math.round(v * 100) + "%");
+      parts.push(`colour ${pct(cal.cap_red)}/${pct(cal.cap_green)}/${pct(cal.cap_blue)}`);
+    }
+    values.textContent = parts.join(" · ") || "no points recorded";
     const clear = document.createElement("button");
     clear.type = "button"; clear.className = "btn"; clear.textContent = "Clear";
     clear.title = `Stop correcting ${entity}`;
@@ -1194,14 +1208,19 @@ function renderSettings() {
       actions.style.padding = "0 0 10px";
       const btn = document.createElement("button");
       btn.type = "button"; btn.className = "btn primary"; btn.id = "calibrate";
-      btn.textContent = "Calibrate…";
-      btn.title = "Match each light to reference patches shown on screen";
-      btn.onclick = openCalibration;
+      btn.textContent = "Calibrate brightness…";
+      btn.title = "Black, mid grey and white: the level response and the white point";
+      btn.onclick = () => openCalibration("level");
+      const btn2 = document.createElement("button");
+      btn2.type = "button"; btn2.className = "btn"; btn2.id = "calibrate-color";
+      btn2.textContent = "Calibrate colour…";
+      btn2.title = "How bright red, green and blue may go, measured against white";
+      btn2.onclick = () => openCalibration("colour");
       const note = document.createElement("span");
       note.className = "mono";
       note.style.fontSize = "12px";
       note.textContent = "one light at a time · others are switched off meanwhile";
-      actions.append(btn, note);
+      actions.append(btn, btn2, note);
       body.appendChild(actions);
       body.appendChild(calibrationResults());
     }
@@ -1468,7 +1487,8 @@ async function watchRestart(port) {
 // the others - a bulb's maximum output varies by colour, sometimes by a factor of two.
 // Hue and saturation are not calibrated: the screen already knows them, and nobody can
 // eyeball "rotate red eight degrees".
-const CAL_STEPS = ["black", "grey", "white", "red", "green", "blue"];
+const CAL_FLOWS = { level: ["black", "grey", "white"], colour: ["red", "green", "blue"] };
+const CAL_STEPS = [];                       // filled per flow - never the same array as a flow
 async function calCall(payload) {
   const r = await fetch("/api/calibration", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1478,7 +1498,7 @@ async function calCall(payload) {
 }
 const CAL_FRAMES = { black: [0, 0, 0], grey: [128, 128, 128], white: [255, 255, 255],
                      red: [255, 0, 0], green: [0, 255, 0], blue: [0, 0, 255] };
-const CAL_START = { black: 20, grey: 150, white: 240, red: 200, green: 200, blue: 200 };
+const CAL_START = { black: 0, grey: 128, white: 255, red: 255, green: 255, blue: 255 };
 const CAL_HELP = {
   black: "Turn it down until the lamp is as dim as it goes without switching off.",
   grey: "Match a mid grey page: neither glowing nor muddy.",
@@ -1496,8 +1516,10 @@ const CAL = {
 };
 
 function calDefaults() {
+  // every value, not just this flow's steps: the colour flow divides by white, which is not
+  // one of its steps
   const values = {};
-  CAL_STEPS.forEach((frame) => { values[frame] = CAL_START[frame]; });
+  Object.keys(CAL_START).forEach((frame) => { values[frame] = CAL_START[frame]; });
   return values;
 }
 
@@ -1554,9 +1576,12 @@ async function calSend() {
   }
 }
 
-async function openCalibration() {
+async function openCalibration(flow) {
   const mapped = LIGHTS.map((l) => l.entity.trim()).filter(Boolean);
   if (!mapped.length) { toast("Pick a light first", true); return; }
+  CAL.flow = flow === "colour" ? "colour" : "level";
+  CAL_STEPS.length = 0;
+  CAL_FLOWS[CAL.flow].forEach((s) => CAL_STEPS.push(s));
   CAL.queue = mapped;
   CAL.qindex = 0;
   CAL.active = false;
@@ -1572,7 +1597,7 @@ async function calEnter(entity) {
   CAL.kelvin = null;
   // start from this light's own stored points, not the previous lamp's
   const known = (CAL_CURRENT || {})[entity] || {};
-  CAL_STEPS.forEach((frame) => {
+  Object.keys(CAL_START).forEach((frame) => {
     if (known[frame] != null) CAL.values[frame] = Math.round(Number(known[frame]));
   });
   CAL.white_scale = Number(known.white_scale || 1);
@@ -1625,7 +1650,7 @@ function renderCalibration() {
             <div class="mono" id="cal-sent" style="margin-top:8px;font-size:12px"></div>
           </div>
         </div>
-        ${slider("cal-level", "Brightness", 1, 255, CAL.values[step])}
+        ${slider("cal-level", "Brightness", 0, 255, CAL.values[step])}
         ${step === "white" ? `
           <div class="row"><div><div class="label">White temperature</div>
             <div class="help">Left is warmer, right is cooler. Leave it alone if the
@@ -1656,10 +1681,15 @@ function renderCalibration() {
   wireSlider("cal-kelvin", (v) => { CAL.kelvin = v; });
 
   $("cal-next").onclick = async () => {
-    const body = { action: "commit", entity: CAL.entity,
-                   black: CAL.values.black, grey: CAL.values.grey, white: CAL.values.white,
-                   caps: calCaps() };
-    if (step === "white" && CAL.kelvin) body.kelvin = CAL.kelvin;
+    const body = { action: "commit", entity: CAL.entity };
+    if (CAL.flow === "level") {
+      body.black = CAL.values.black;
+      body.grey = CAL.values.grey;
+      body.white = CAL.values.white;
+      if (step === "white" && CAL.kelvin) body.kelvin = CAL.kelvin;
+    } else {
+      body.caps = calCaps();
+    }
     const out = await calCall(body);
     if (!out.ok) { toast("Could not save: " + out.error, true); return; }
     advance();
@@ -2016,9 +2046,6 @@ SETTINGS = [
     _spec("BRIGHTNESS_FROM", "enum", "lstar", "Calibration", "Brightness source",
           "luminance = physical light, lstar = perceptual CIELAB, value = brightest channel "
           "(hue has no effect).", values=["luminance", "lstar", "value"], advanced=True),
-    _spec("BRIGHTNESS_GAMMA", "float", 0.8, "Calibration", "Brightness gamma",
-          "Tone curve on the 0-1 input: <1 lifts dim frames, >1 crushes them.",
-          min=0.3, max=2.5, step=0.05, advanced=True),
 
     _spec("ZONE_ROWS", "int", 3, "Capture", "Zone rows",
           "How many rows the screen is split into. Changing this re-splits every "
@@ -2950,8 +2977,10 @@ def calibrated_brightness(luminance: float, cal: dict) -> int | None:
     Interpolated in luminance^(1/3), close to how level is perceived, so a lamp that is
     non-linear between black and 50% grey does not get a kink at the middle.
     """
-    points = [(CALIBRATION_LEVEL_LUMINANCE[key], cal.get(key))
-              for key in ("black", "grey", "white")]
+    grey_x = CALIBRATION_GREY_ANCHOR.get(BRIGHTNESS_FROM, 0.2159)
+    points = [(CALIBRATION_LEVEL_LUMINANCE["black"], cal.get("black")),
+              (grey_x, cal.get("grey")),
+              (CALIBRATION_LEVEL_LUMINANCE["white"], cal.get("white"))]
     if any(value is None for _y, value in points):
         return None
     anchors = [(max(0.0, y) ** (1 / 3), float(b)) for y, b in points]
@@ -3019,7 +3048,9 @@ def calibration_for(entity: str) -> dict | None:
 
 def brightness_for_luminance(lum: float) -> int:
     """Relative luminance 0..1 -> 1-255 brightness (0 = off in HA, so floor at 1)."""
-    return int(round(max(1.0, min(255.0, 255.0 * max(0.0, lum) ** BRIGHTNESS_GAMMA))))
+    # the response comes from the calibration curve now (or its default points); there is
+    # no separate exponent to disagree with it
+    return calibrated_brightness(max(0.0, min(1.0, lum)), CAL_DEFAULT_CURVE)
 
 
 def lstar_from_luminance(y: float) -> float:
@@ -3030,7 +3061,7 @@ def lstar_from_luminance(y: float) -> float:
 
 
 def brightness_channel(colour: dict) -> float:
-    """The 0..1 quantity that BRIGHTNESS_GAMMA is applied to."""
+    """The 0..1 quantity the brightness curve is applied to."""
     if BRIGHTNESS_FROM == "value":
         return max(colour["rgb"]) / 255.0
     if BRIGHTNESS_FROM == "lstar":
@@ -3041,8 +3072,9 @@ def brightness_channel(colour: dict) -> float:
 def brightness_for_colour(colour: dict) -> int:
     measured = colour.get("calibration_brightness")
     if measured is not None:
-        level = float(measured)             # the three measured points decide the response
+        level = float(measured)             # a calibration step is being shown as-is
     else:
+        # the curve - measured, or the identity default - decides the response
         level = float(brightness_for_luminance(brightness_channel(colour)))
     cap = float(colour.get("calibration_cap", 1.0))
     if cap != 1.0:                           # ... and no colour outshines another
@@ -4496,9 +4528,10 @@ def save_calibration() -> bool:
 CALIBRATION_SESSION: dict = {}          # what to put back when the user finishes
 
 
-def _frame_colour(frame: str, level: str) -> list[int]:
+def _frame_colour(frame: str, level: str = "white") -> list[int]:
+    """The frame at a fraction of full scale, for the CLI accuracy sweep."""
     rgb = CALIBRATION_FRAMES[frame]
-    scale = CALIBRATION_LEVELS.get(level, 0.5)
+    scale = {"dark": 0.25, "mid": 0.5, "light": 0.82}.get(level, 1.0)
     return [int(round(channel * scale)) for channel in rgb]
 
 
@@ -4509,7 +4542,7 @@ def _send_now(entity: str, xy, brightness: int, kelvin: float | None = None) -> 
     else:
         body["xy_color"] = [round(xy[0], 4), round(xy[1], 4)]
     if SEND_BRIGHTNESS:
-        body["brightness"] = brightness
+        body["brightness"] = max(1, int(brightness))     # 0 would switch the lamp off
     body["transition"] = 0
     try:
         response = _post(body, timeout=REQUEST_TIMEOUT)
@@ -4523,7 +4556,10 @@ def _send_now(entity: str, xy, brightness: int, kelvin: float | None = None) -> 
 def get_calibration():
     return {"ok": True, "lights": CALIBRATION,
             "frames": {name: list(rgb) for name, rgb in CALIBRATION_FRAMES.items()},
-            "levels": CALIBRATION_LEVELS}
+            "flows": {"level": ["black", "grey", "white"],
+                      "colour": ["red", "green", "blue"]},
+            "start_brightness": CALIBRATION_START_BRIGHTNESS,
+            "defaults": {"curve": CAL_DEFAULT_CURVE}}
 
 
 @app.post("/api/calibration")
@@ -4597,7 +4633,9 @@ def post_calibration(payload: Any = Body(...)):
         except (TypeError, ValueError):
             return JSONResponse({"ok": False, "error": "brightness must be a number"},
                                 status_code=400)
-        brightness = max(1, min(255, brightness))
+        # 0 is a legitimate answer for the black point ("off at black"); the send clamps to
+        # 1 because HA treats brightness 0 as "turn the light off"
+        brightness = max(0, min(255, brightness))
         rgb = CALIBRATION_FRAMES[frame]
         neutral = frame in ("black", "grey", "white")
         # a neutral patch is shown and sent as the same chromaticity; the level is the

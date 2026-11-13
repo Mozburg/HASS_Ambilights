@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.13.2** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.14.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -211,11 +211,16 @@ Calibrate once and the panel walks every mapped light (`light 2 of 3`), soloing 
 the rest are switched off while you match, and everything is restored when you finish. Each
 light keeps its own points; **Clear** on the Calibration card forgets one.
 
-Anything uncalibrated keeps the generic response (`BRIGHTNESS_FROM`, `BRIGHTNESS_GAMMA`),
-so the program works before you calibrate anything.
+**Two flows, because they are different judgements:** *Calibrate brightness…* walks black,
+grey and white (plus the white temperature); *Calibrate colour…* walks red, green and blue.
+Neither makes you redo the other.
 
-`SATURATION_BOOST`, `BRIGHTNESS_FROM` and `BRIGHTNESS_GAMMA` sit under **Advanced** in the
-same card. `--calibrate` on the command line still runs the old twelve-colour accuracy sweep.
+Anything uncalibrated uses the **identity curve** — black `0`, mid grey `128`, white `255` —
+so the program works before you calibrate anything. There is no brightness gamma any more:
+three measured points say more than one exponent, and the defaults are already a sane
+response.
+
+`SATURATION_BOOST` and `BRIGHTNESS_FROM` sit under **Advanced** in the same card. `--calibrate` on the command line still runs the old twelve-colour accuracy sweep.
 
 ## White frames use the bulb's own white
 
@@ -276,8 +281,8 @@ Two things will quietly ruin a calibration, so the panel says both: turn off Win
 light you actually watch in. A calibration corrects a bulb that leans cyan or orange; it
 cannot correct a lampshade.
 
-`BRIGHTNESS_FROM`, `BRIGHTNESS_GAMMA` and `SATURATION_BOOST` sit under **Advanced** in the
-same card — they are the numeric half of the same job. `--calibrate` on the command line
+`BRIGHTNESS_FROM` and `SATURATION_BOOST` sit under **Advanced** in the same card — they are the
+numeric half of the same job. `--calibrate` on the command line
 still runs the old twelve-colour accuracy sweep.
 
 ## The colour knobs
@@ -293,7 +298,7 @@ still runs the old twelve-colour accuracy sweep.
 | `WHITE_MODE` | `auto` sends neutral frames as colour temperature (the bulb's white LEDs), `xy` keeps everything on chromaticity |
 | `SATURATION_BOOST` | (Calibration card) off by default: sends the measured chromaticity untouched. On, it pushes chroma away from white as the frame brightens, capped and gamut-clamped |
 | `BRIGHTNESS_FROM` | (Calibration card) `luminance` (physical), `lstar` (perceptual, default), `value` (brightest channel — hue has no effect) |
-| `BRIGHTNESS_GAMMA` | (Calibration card) tone curve on the brightness input |
+| `BRIGHTNESS_FROM` | which quantity feeds the brightness curve |
 | `SEND_MODE` | `xy` (default, precise) or legacy `rgb` |
 | `ZONE_ROWS`, `ZONE_COLS` | how many zones the screen is split into (default 3 × 3). Up to 8 × 8, so a wide desk can be 5 × 3 and a wall of spotlights 4 × 4. Zones are numbered in reading order; shrinking the grid is refused while a light's mapping still uses a zone that no longer exists |
 

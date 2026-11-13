@@ -8,6 +8,32 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-11-12
+
+### Changed
+- **`BRIGHTNESS_GAMMA` is gone.** Three measured points describe the response better than one
+  exponent, and they now serve as its replacement for uncalibrated lights too: the **identity
+  curve** — black `0`, mid grey `128`, white `255`. Existing configs that carry the old key
+  simply lose it; nothing else reads it.
+- **Calibration is two flows**, because they are different judgements:
+  **Calibrate brightness…** walks black, grey and white (plus the white temperature), and
+  **Calibrate colour…** walks red, green and blue. Each commits only what it measured, so
+  tweaking red no longer means redoing the white point.
+- Calibration defaults are the identity values: black `0`, grey `128`, white `255`, colour
+  `255` — so an untouched flow changes nothing, and `0` is a legitimate black point ("off at
+  black"; the send floors at 1 because HA treats brightness 0 as off).
+
+### Fixed
+- **The Calibration card never listed anything.** `GET /api/calibration` raised
+  `NameError: CALIBRATION_LEVELS` (a constant removed with the old level model), so the card
+  had nothing to show after calibrating. The endpoint now reports the frames, both flows, the
+  start values and the defaults.
+- The results row still formatted the v1 record (`hue`/`chroma`/`level`), so a calibrated
+  light showed `NaN`. It now shows the curve and the colour factors that are actually stored.
+- `CAL_STEPS` aliased the flow definition, so opening the brightness flow emptied it and the
+  panel failed to render; and the colour flow divided by a `white` value it never initialised,
+  storing nonsense caps. Both fixed.
+
 ## [2.13.2] — 2026-11-12
 
 ### Fixed

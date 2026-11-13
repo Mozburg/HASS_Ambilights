@@ -8,6 +8,28 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.12.0] — 2026-11-12
+
+### Added
+- **A calibration session walks every mapped light.** Calibration is per light — the lamps
+  differ, and each is soloed while it is matched — but the panel used to calibrate one and
+  close, leaving you to remember which was done. It now queues all mapped lights, says
+  `light 2 of 3`, and moves to the next when you finish one. Each light starts from its own
+  stored offsets rather than carrying the previous lamp's across.
+- The **quick pass covers every light once (4 frames each), then the refinement pass does
+  the same circuit** with dark and light frames, rather than refining the first lamp before
+  the second has been looked at.
+- Every light's original state is saved when the session starts and restored when it ends,
+  including the one being calibrated, so finishing puts the room back rather than leaving
+  the others off.
+
+### Fixed
+- **Dark, mid and light sent the same brightness for colour frames.** Brightness was derived
+  from the frame's own luminance with a floor larger than a dim pure colour's luminance, so
+  red-dark and red-mid were identical and every blue step matched. The level now drives
+  brightness directly: `dark 125 · mid 198 · light 247` for red, green and blue alike, and
+  the brightness slider still scales the whole ladder.
+
 ## [2.11.1] — 2026-11-12
 
 ### Fixed

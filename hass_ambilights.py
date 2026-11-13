@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.11.1"
+__version__ = "2.12.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -404,7 +404,10 @@ CALIBRATION_FRAMES = {
     "green": (0, 255, 0),
     "blue": (0, 0, 255),
 }
-CALIBRATION_LEVELS = {"dark": 0.25, "mid": 0.5, "light": 0.82}   # of full scale
+CALIBRATION_LEVELS = {"dark": 0.25, "mid": 0.5, "light": 0.82}
+# The level's own brightness, separate from how far the on-screen patch is dimmed: the
+# ladder has to be three clearly different outputs, not three shades of "quite bright".
+CALIBRATION_BRIGHTNESS = {"dark": 0.12, "mid": 0.45, "light": 0.90}   # of full scale
 
 # --------------------------------------------------------------- targets ----
 class Target:
@@ -1463,6 +1466,7 @@ async function watchRestart(port) {
 const CAL = {
   entity: null, steps: [], index: 0, hue: 0, chroma: 1.0, level: 1.0, warmth: 0.0,
   active: false, busy: false, mode: "quick",   // quick 4 -> refine 10 -> full 12
+  queue: [], qindex: 0,                        // every mapped light, one at a time
 };
 
 const CAL_FRAMES = { white: [255, 255, 255], red: [255, 0, 0],
@@ -1496,16 +1500,32 @@ async function calCall(payload) {
   return r.json();
 }
 
+// Calibration is per light - the lamps differ, and each one is soloed while it is being
+// matched - but the session walks all of them so nobody has to remember which are done.
 async function openCalibration() {
-  const entity = (LIGHTS.find((l) => l.entity.trim()) || {}).entity;
-  if (!entity) { toast("Pick a light first", true); return; }
-  CAL.entity = entity.trim();
-  CAL.steps = calSteps(CAL.mode);
-  CAL.index = 0; CAL.hue = 0; CAL.chroma = 1.0; CAL.level = 1.0;
-  const started = await calCall({ action: "start", entity: CAL.entity });
-  if (!started.ok) { toast("Calibration: " + started.error, true); return; }
+  const mapped = LIGHTS.map((l) => l.entity.trim()).filter(Boolean);
+  if (!mapped.length) { toast("Pick a light first", true); return; }
+  CAL.queue = mapped;
+  CAL.qindex = 0;
+  CAL.mode = "quick";
+  if (!(await calEnter(CAL.queue[0]))) return;
   CAL.active = true;
   renderCalibration();
+}
+
+async function calEnter(entity) {
+  CAL.entity = entity;
+  CAL.steps = calSteps(CAL.mode);
+  CAL.index = 0;
+  // each light starts from its own stored offsets, not the previous lamp's
+  const known = (CAL_CURRENT || {})[entity];
+  CAL.hue = known ? Number(known.hue) || 0 : 0;
+  CAL.chroma = known ? Number(known.chroma) || 1 : 1.0;
+  CAL.level = known ? Number(known.level) || 1 : 1.0;
+  CAL.warmth = known ? Number(known.warmth) || 0 : 0;
+  const started = await calCall({ action: CAL.active ? "switch" : "start", entity });
+  if (!started.ok) { toast("Calibration: " + started.error, true); return false; }
+  return true;
 }
 
 async function closeCalibration() {
@@ -1584,7 +1604,9 @@ function renderCalibration() {
           <div style="flex:0 0 120px;height:120px;border-radius:10px;border:1px solid var(--line);
                background:${calReference(step)}" aria-label="reference colour"></div>
           <div>
-            <div class="mono" style="font-size:12px;color:var(--muted)">step ${CAL.index + 1} of ${CAL.steps.length}</div>
+            <div class="mono" style="font-size:12px;color:var(--muted)">
+              light ${CAL.qindex + 1} of ${CAL.queue.length || 1} · step ${CAL.index + 1} of ${CAL.steps.length}
+            </div>
             <div style="font-size:16px;margin:2px 0 6px">${calStepLabel()} — make the lamp match this patch</div>
             <div class="mono" id="cal-sent" style="font-size:12px;color:var(--muted)">not sent yet</div>
           </div>
@@ -1646,21 +1668,34 @@ function renderCalibration() {
 }
 
 function advance() {
-  if (CAL.index + 1 >= CAL.steps.length) {
-    if (CAL.mode === "quick") {          // 4 done: keep going automatically
-      const done = CAL.steps.length;
-      CAL.mode = "refine";
-      CAL.steps = calSteps("refine");
-      CAL.index = done;                  // first step the quick pass did not cover
-      toast("Quick pass done — refining with dark and light frames (6 more)");
-      renderCalibration();
-      return;
-    }
-    closeCalibration();
+  if (CAL.index + 1 < CAL.steps.length) {
+    CAL.index += 1;
+    renderCalibration();
     return;
   }
-  CAL.index += 1;
-  renderCalibration();
+  // this light is done: quick covers every light once, then the refinement pass does the
+  // same circuit again with dark and light frames
+  if (CAL.qindex + 1 < CAL.queue.length) {
+    CAL.qindex += 1;
+    const next = CAL.queue[CAL.qindex];
+    toast(`Next light: ${next}`);
+    calEnter(next).then((ok) => { if (ok) renderCalibration(); else closeCalibration(); });
+    return;
+  }
+  if (CAL.mode === "quick") {
+    CAL.mode = "refine";
+    CAL.qindex = 0;
+    const done = CAL.steps.length;
+    toast(`Quick pass done over ${CAL.queue.length} light(s) — refining with dark and light frames`);
+    calEnter(CAL.queue[0]).then((ok) => {
+      if (!ok) { closeCalibration(); return; }
+      CAL.steps = calSteps("refine");
+      CAL.index = done;              // every step the quick pass did not cover
+      renderCalibration();
+    });
+    return;
+  }
+  closeCalibration();
 }
 
 /* ----------------------------------------------------------------- wiring -- */
@@ -4448,13 +4483,16 @@ def post_calibration(payload: Any = Body(...)):
         if not check_ha():
             return JSONResponse({"ok": False, "error": "Home Assistant is unreachable"},
                                 status_code=400)
-        # silence the pipeline and remember what the other lights were showing
+        # silence the pipeline and remember what EVERY light was showing, before any of
+        # them is switched off - capturing on each switch recorded "off" and then restored
+        # the room to off when the session ended
         TUNING.set()
         CALIBRATION_SESSION.clear()
         for target in TARGETS:
+            CALIBRATION_SESSION[target.entity_id] = _autotune_attrs([target])[0]
+        for target in TARGETS:
             if target.entity_id == entity:
                 continue
-            CALIBRATION_SESSION[target.entity_id] = _autotune_attrs([target])[0]
             try:
                 requests.post(f"{HA_URL}/api/services/light/turn_off",
                               headers=auth_headers(),
@@ -4468,6 +4506,26 @@ def post_calibration(payload: Any = Body(...)):
                 stats["calibration_errors"] += 1
         return {"ok": True, "solo": entity, "soloed": sorted(CALIBRATION_SESSION),
                 "frames": sorted(CALIBRATION_FRAMES), "levels": CALIBRATION_LEVELS}
+
+    if action == "switch":
+        # move to the next light without re-capturing: the states saved at start are the
+        # room's real state, and re-reading them now would save "off"
+        if not entity.startswith("light."):
+            return JSONResponse({"ok": False, "error": "entity must be a light"}, status_code=400)
+        if not CALIBRATION_SESSION:
+            return JSONResponse({"ok": False, "error": "no calibration session"},
+                                status_code=400)
+        for target in TARGETS:
+            if target.entity_id == entity:
+                continue
+            try:
+                requests.post(f"{HA_URL}/api/services/light/turn_off",
+                              headers=auth_headers(), json={"entity_id": target.entity_id},
+                              timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as exc:
+                log.warning("could not switch %s off: %s", target.entity_id, exc)
+        return {"ok": True, "solo": entity, "soloed": sorted(
+            t.entity_id for t in TARGETS if t.entity_id != entity)}
 
     if action == "apply":
         frame = str(payload.get("frame") or "white")
@@ -4483,11 +4541,14 @@ def post_calibration(payload: Any = Body(...)):
             hue = 0.0                      # white only gets brightness and warm/cool
             chroma = 1.0                   # scaling a neutral moves nothing; warmth does
         xy = calibrate_xy(xy_from_rgb(rgb), hue, chroma, warmth)
-        # the slider multiplies the frame's own luminance, so 1.0 means "as measured"
-        frame_lum = float(np.dot(_srgb_to_linear(np.asarray(rgb, dtype=np.float32) / 255.0),
-                                 np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)))
+        # The LEVEL is the brightness: dark/mid/light must be three different outputs.
+        # Deriving it from the frame's own luminance made red-dark and red-mid identical
+        # (a dim pure colour's luminance fell under the floor), so a step that should be
+        # brighter was sent at the same level. The level fraction is the intent; the
+        # brightness curve still shapes it.
+        level_fraction = float(CALIBRATION_BRIGHTNESS.get(level, 0.45))
         colour = {"rgb": rgb, "xy": [round(xy[0], 4), round(xy[1], 4)],
-                  "luminance": max(0.02, min(1.0, level_scale * max(frame_lum, 0.05))),
+                  "luminance": max(0.01, min(1.0, level_scale * level_fraction)),
                   "calibration_level": 1.0}
         brightness = brightness_for_colour(colour)
         # calibrating white has to tune the path the pipeline actually uses: the bulb's

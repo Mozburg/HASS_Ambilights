@@ -1705,6 +1705,42 @@ print("white ok: the white calibration step sends color_temp_kelvin, warmth move
 
 m.LIGHT_CAPS.pop("light.cal", None)
 
+# --- the dark/mid/light ladder must actually differ -------------------------
+for _frame in ("white", "red", "green", "blue"):
+    _b = {}
+    for _level in ("dark", "mid", "light"):
+        _rgb = m._frame_colour(_frame, _level)
+        _c = {"rgb": _rgb, "xy": list(m.xy_from_rgb(_rgb)),
+              "luminance": max(0.01, min(1.0, m.CALIBRATION_BRIGHTNESS[_level])),
+              "calibration_level": 1.0}
+        _b[_level] = m.brightness_for_colour(_c)
+    assert _b["dark"] < _b["mid"] < _b["light"], f"{_frame} ladder is flat: {_b}"
+    assert _b["mid"] - _b["dark"] >= 20 and _b["light"] - _b["mid"] >= 20, (
+        f"{_frame} steps are too close to judge: {_b}")
+print("calibration ok: dark/mid/light are three different brightnesses for every frame")
+
+# ... and the same through the endpoint, which is what the panel actually calls
+_co = {"rgb": [128, 0, 0], "xy": list(m.xy_from_rgb([128, 0, 0])), "luminance": 0.45,
+       "calibration_level": 1.0}
+_store = m.LIGHT_CAPS.pop("light.a", None)
+try:
+    _seen_bright = []
+    _orig = m._send_now
+    m._send_now = lambda entity, xy, br, kelvin=None: (
+        _seen_bright.append(br), True)[1]
+    try:
+        for _level in ("dark", "mid", "light"):
+            m.post_calibration({"action": "apply", "entity": "light.a", "frame": "red",
+                                "level": _level, "level_scale": 1.0})
+    finally:
+        m._send_now = _orig
+finally:
+    if _store:
+        m.LIGHT_CAPS["light.a"] = _store
+assert _seen_bright[0] < _seen_bright[1] < _seen_bright[2], (
+    f"the endpoint sends one brightness for every level: {_seen_bright}")
+print(f"calibration ok: the endpoint's red steps go {_seen_bright}")
+
 # the endpoint: solo, apply, commit, clear, end -- with the radio stubbed out
 import types as _types
 _calls = []
@@ -1721,7 +1757,10 @@ try:
     m.TARGETS = m.parse_light_map("light.a=1,2; light.b=3,4; light.c=5,6")
     m.CALIBRATION.clear(); m.CALIBRATION_SESSION.clear()
     _r = m.post_calibration({"action": "start", "entity": "light.a"})
-    assert _r["ok"] and _r["solo"] == "light.a" and _r["soloed"] == ["light.b", "light.c"], _r
+    # every light's original state is saved (so finishing restores the room, not "off"),
+    # but only the others are switched off
+    assert _r["ok"] and _r["solo"] == "light.a", _r
+    assert _r["soloed"] == ["light.a", "light.b", "light.c"], _r
     assert m.TUNING.is_set(), "calibration must silence the pipeline"
     assert [c for c in _calls if c[0] == "off"] == [("off", "light.b"), ("off", "light.c")], _calls
     _calls.clear()
@@ -1758,7 +1797,9 @@ try:
     _calls.clear()
     _r = m.post_calibration({"action": "end"})
     assert _r["ok"] and not m.TUNING.is_set(), "ending must let the pipeline run again"
-    assert sorted(c[1] for c in _calls if c[0] == "restore") == ["light.b", "light.c"], _calls
+    # the whole room comes back, including the light that was being calibrated
+    assert sorted(c[1] for c in _calls if c[0] == "restore") == [
+        "light.a", "light.b", "light.c"], _calls
 
     _dry = m.DRY_RUN; m.DRY_RUN = True
     assert m.post_calibration({"action": "start", "entity": "light.a"}).status_code == 400

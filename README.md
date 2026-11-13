@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.11.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.12.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -187,6 +187,11 @@ the sensor.
 Press **Calibrate…**, pick a light, and the app switches the others off, puts an exact
 reference patch on screen and sets that light to the same colour. Drag **hue**,
 **saturation** and **brightness** until the two match, then **Looks right**:
+
+The session **walks every mapped light**, one at a time: press **Calibrate…**, work through
+the steps for the first lamp, and the panel moves to the next and says `light 2 of 3`. Each
+light keeps its own offsets. The quick pass covers every light once, then the refinement
+pass does the same circuit.
 
 | | |
 |---|---|

@@ -8,7 +8,7 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
-## [2.15.0] — 2026-11-13
+## [2.15.0] — 2026-11-19
 
 ### Added
 - **A Windows installer**, and the app builds its own: `packaging/hass-ambilights.iss` is

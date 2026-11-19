@@ -2662,8 +2662,17 @@ def srgb_from_xy(xy, level: float = 1.0) -> list[int]:
 
 
 def _in_srgb_gamut(xy) -> bool:
-    """True when xy can be shown by an sRGB display without a negative channel."""
-    return min(_linear_rgb_from_xy(xy)) >= -1e-4
+    """True when xy can be shown by an sRGB display without a negative channel.
+
+    The chromaticity has to exist first: y = 0 (and anything outside the xy triangle) is
+    not a colour, and `_linear_rgb_from_xy` answers those with zeros, which used to read
+    as "in gamut". Every caller also checks `valid_xy`, but the two must not disagree
+    about what a colour is - the calibration sliders lean on both.
+    """
+    x, y = float(xy[0]), float(xy[1])
+    if not (y > 1e-6 and x >= 0.0 and x + y <= 1.0):
+        return False
+    return min(_linear_rgb_from_xy((x, y))) >= -1e-4
 
 
 def _xy_to_uv(xy) -> tuple[float, float]:

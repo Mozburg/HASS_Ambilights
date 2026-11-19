@@ -2368,4 +2368,19 @@ _dim = m.rgb_at_level((0.64, 0.33), 0.05)
 assert max(_dim) < 255 and _dim[0] > 40, _dim
 print("hue preservation ok: no level can clip a chromaticity into another colour")
 
+# --- gamut and chromaticity must agree on what a colour is ----------------
+# _linear_rgb_from_xy answers a non-chromaticity with zeros, which "min(...) >= -1e-4"
+# read as in-gamut. Nothing calls it without valid_xy today, but the calibration
+# sliders gate on both, so they must not disagree.
+for _xy in ((0.3, 0.0), (0.3, -0.1), (0.9, 0.3), (0.5, 0.6), (1.2, 0.3)):
+    assert m.valid_xy(_xy) is False, _xy
+    assert m._in_srgb_gamut(_xy) is False, "not a chromaticity, but called in gamut: %s" % (_xy,)
+for _xy in (m.D65_XY, (0.64, 0.33), (0.30, 0.60), (0.24, 0.28)):
+    assert m._in_srgb_gamut(_xy) is True, _xy
+    assert m.valid_xy(_xy) is True, _xy
+# a saturated screen still calibrates: the hue slider is not dead on blue
+assert m.calibrate_xy((0.15, 0.06), 25.0, 1.0) != (0.15, 0.06)
+assert m.calibrate_xy(m.D65_XY, 0.0, 1.0, warmth=1.0) != m.D65_XY
+print("gamut ok: a chromaticity test and a gamut test that cannot disagree")
+
 print("ALL CHECKS PASSED")

@@ -2304,10 +2304,13 @@ _script = _iss.read_text(encoding="utf-8")
 for piece in ("OutputBaseFilename=HassAmbilights-Setup-{#AppVersion}",
               "AppId={{7B2F4C6E-9A31-4D5E-8C7A-3F1E6D2B9C40}",
               "PrivilegesRequired=lowest", "DefaultDirName={localappdata}",
-              "CloseApplications=yes", "skipifsilent", "uninsdeletevalue",
+              "CloseApplications=yes", "skipifsilent",
+              "ArchitecturesAllowed=x64",      # not x64compatible: needs Inno 6.3+
               'Source: "..\\dist\\{#AppExe}"'):
     assert piece in _script, "the installer lost: " + piece
 assert "desktopicon" in _script and "[UninstallRun]" in _script
+assert "reg.exe" in _script and "/v HassAmbilights /f" in _script, \
+    "the uninstaller must remove the Start-with-Windows value"
 _flow = (_root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8")
 for piece in ("hass-ambilights.iss", "HassAmbilights-Setup-*.exe", "SHA256SUMS.txt",
               "/VERYSILENT", "unins000.exe"):

@@ -94,17 +94,32 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          # Find Inno, or install it. The runner image usually has it already, but the
+          # version differs between images, which is why the .iss sticks to constructs
+          # every Inno Setup 6.x understands.
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
-            choco install innosetup --no-progress -y
-            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+            try { choco install innosetup --no-progress -y } catch { Write-Host "choco failed: $_" }
+          }
+          if (-not (Test-Path $iscc)) {
+            $found = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) { $iscc = $found.FullName }
           }
           if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is not available on this runner" }
+          Write-Host "using $iscc"
+          (Get-Item $iscc).VersionInfo.ProductVersion | Write-Host
 
           $version = (python packaging/make_assets.py --version).Trim()
           if (-not $version) { throw "could not read __version__" }
-          & $iscc "/DAppVersion=$version" "packaging\hass-ambilights.iss"
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+          & $iscc "/DAppVersion=$version" "packaging\hass-ambilights.iss" 2>&1 | Tee-Object -Variable isccOut
+          if ($LASTEXITCODE -ne 0) {
+            # the log is only visible to admins, so put the compiler's own words where a
+            # failure can be read at a glance
+            "### ISCC failed (exit $LASTEXITCODE)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            $isccOut | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            throw ("ISCC failed (exit $LASTEXITCODE): " + ($isccOut -join " | "))
+          }
 
           $setup = "dist\HassAmbilights-Setup-$version.exe"
           if (-not (Test-Path $setup)) { throw "$setup was not produced" }

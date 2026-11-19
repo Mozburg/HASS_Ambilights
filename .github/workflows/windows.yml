@@ -264,8 +264,11 @@ jobs:
             '{"HA_URL":"http://127.0.0.1:9"}' | Set-Content -Encoding ascii $cfg
             New-Item -ItemType Directory -Force -Path $logs | Out-Null
             'line' | Set-Content -Encoding ascii (Join-Path $logs "app.log")
-            New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-              -Name "HassAmbilights" -Value "C:\gone.exe" -PropertyType String -Force | Out-Null
+            # the Run key is created on demand by Windows; a fresh runner may not have it
+            $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+            if (-not (Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
+            New-ItemProperty -Path $runKey -Name "HassAmbilights" -Value "C:\gone.exe" `
+              -PropertyType String -Force | Out-Null
 
             # the uninstaller re-launches itself from %TEMP%, so -Wait returns before the
             # files are gone: poll rather than race it
@@ -289,8 +292,9 @@ jobs:
             if (Test-Path $data) { $left += "settings $data" }
             if (Test-Path $logs) { $left += "logs $logs" }
             if (Test-Path $installed) { $left += "install dir $installed" }
-            if (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-                  -Name "HassAmbilights" -ErrorAction SilentlyContinue) { $left += "Run key" }
+            if (Get-ItemProperty -Path $runKey -Name "HassAmbilights" -ErrorAction SilentlyContinue) {
+              $left += "Run key"
+            }
             if ($left.Count -gt 0) {
               Emit-Failure ("the clean reset left: " + ($left -join ", "))
               throw ("uninstall left: " + ($left -join ", "))

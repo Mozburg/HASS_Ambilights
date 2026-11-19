@@ -85,7 +85,13 @@ jobs:
           if ($welcome.Content -notmatch "Set up HASS Ambilights") { throw "/welcome did not render" }
           $update = Invoke-RestMethod -Uri "http://127.0.0.1:8123/api/update" -TimeoutSec 5
           if ($update.current -ne $version) { throw "updater reports $($update.current), exe says $version" }
-          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          # a one-file exe is a bootloader plus a child; killing the bootloader leaves
+          # the app running and holding the port, and the install step would then see it
+          taskkill /F /IM HassAmbilights.exe 2>$null | Out-Null
+          Start-Sleep -Seconds 2
+          if (Get-Process HassAmbilights -ErrorAction SilentlyContinue) {
+            throw "the smoke-test app survived taskkill"
+          }
           if ($version -ne "$((Get-Content hass_ambilights.py | Select-String '__version__ = "([0-9.]+)"').Matches.Groups[1].Value)") {
             throw "exe reports $version, source says something else"
           }
@@ -161,70 +167,120 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          function Emit-Failure([string]$text) {
+            $flat = ($text -replace "`r?`n", " | ")
+            if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) + " ..." }
+            Write-Host "::error title=Installed app::$flat"
+          }
+
+          function Stop-App {
+            # the one-file exe is a bootloader plus a child: kill by name and wait it out
+            for ($i = 0; $i -lt 10; $i++) {
+              taskkill /F /IM HassAmbilights.exe 2>$null | Out-Null
+              Start-Sleep -Milliseconds 700
+              if (-not (Get-Process HassAmbilights -ErrorAction SilentlyContinue)) { return $true }
+            }
+            return $false
+          }
+
           $version = (python packaging/make_assets.py --version).Trim()
           $setup = "dist\HassAmbilights-Setup-$version.exe"
           $installed = Join-Path $env:LOCALAPPDATA "Programs\HASS Ambilights"
           $data = Join-Path $env:APPDATA "HassAmbilights"
+          $logs = Join-Path $env:LOCALAPPDATA "HassAmbilights\logs"
 
-          # the installer must be able to run with no interaction at all
-          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
-          if (-not (Test-Path (Join-Path $installed "HassAmbilights.exe"))) {
+          # nothing of ours may be running while the installer works
+          if (-not (Stop-App)) {
+            Emit-Failure "an app instance survived taskkill before the install"
+            throw "could not clear running instances"
+          }
+
+          # the installer must run with no interaction at all
+          $p = Start-Process -FilePath $setup `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" `
+            -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Emit-Failure "installer exited $($p.ExitCode)"
+            throw "installer exited $($p.ExitCode)"
+          }
+          $exe = Join-Path $installed "HassAmbilights.exe"
+          if (-not (Test-Path $exe)) {
+            $seen = (Get-ChildItem $installed -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name) -join ", "
+            Emit-Failure "no exe at $installed (found: $seen)"
             throw "the exe is not under $installed"
           }
           $uninstaller = Join-Path $installed "unins000.exe"
-          if (-not (Test-Path $uninstaller)) { throw "no uninstaller was written" }
-          # [Run] is skipifsilent: a silent install must not leave the app behind,
-          # or the health check below would talk to the wrong process
+          if (-not (Test-Path $uninstaller)) {
+            Emit-Failure "no uninstaller was written to $installed"
+            throw "no uninstaller was written"
+          }
+          # [Run] is skipifsilent: a silent install must not leave the app behind
           if (Get-Process HassAmbilights -ErrorAction SilentlyContinue) {
-            throw "the silent install started the app - [Run] must stay skipifsilent"
+            Emit-Failure "the silent install started the app - [Run] must stay skipifsilent"
+            throw "the silent install started the app"
           }
 
-          # and the installed copy is a working app, with the updater able to find itself
-          $proc = Start-Process -FilePath (Join-Path $installed "HassAmbilights.exe") `
-            -ArgumentList "--server", "--no-browser" -PassThru `
-            -Environment @{ BIND_PORT = "8125"; DRY_RUN = "1"; HA_URL = "http://127.0.0.1:9" }
+          # and the installed copy is a working app
+          $proc = Start-Process -FilePath $exe -ArgumentList "--server", "--no-browser" -PassThru `
+            -Environment @{ BIND_PORT = "8125"; DRY_RUN = "1"; HA_URL = "http://127.0.0.1:9";
+                            CONFIG_FILE = (Join-Path $env:TEMP "installed-ci.json") }
           $ok = $false
           for ($i = 0; $i -lt 60; $i++) {
             Start-Sleep -Milliseconds 500
             try {
               $h = Invoke-RestMethod -Uri "http://127.0.0.1:8125/health" -TimeoutSec 2
-              if ($h.version -eq $version) { $ok = $true }
-              break
+              if ($h.version -eq $version) { $ok = $true; break }
             } catch { }
             if ($proc.HasExited) { break }
           }
-          if (-not $ok) { throw "the installed exe never answered /health as $version" }
+          if (-not $ok) {
+            $log = Join-Path $env:LOCALAPPDATA "HassAmbilights\logs\app.log"
+            $tail = if (Test-Path $log) { (Get-Content $log -Tail 25) -join " | " } else { "no log" }
+            Emit-Failure "the installed exe never answered /health as $version (exited: $($proc.HasExited)): $tail"
+            Stop-App
+            throw "the installed exe never answered /health as $version"
+          }
           Write-Host "installed app answered /health as $version"
 
-          # the uninstall is a clean reset: settings, logs and program folder all go,
-          # so seed both data folders and prove none of it survives
+          # the uninstall is a clean reset: seed everything it writes and prove none survives
+          Stop-App | Out-Null
           $cfg = Join-Path $data "config.json"
-          $logs = Join-Path $env:LOCALAPPDATA "HassAmbilights\logs"
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
           '{"HA_URL":"http://127.0.0.1:9"}' | Set-Content -Encoding ascii $cfg
           New-Item -ItemType Directory -Force -Path $logs | Out-Null
           'line' | Set-Content -Encoding ascii (Join-Path $logs "app.log")
           New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
             -Name "HassAmbilights" -Value "C:\gone.exe" -PropertyType String -Force | Out-Null
 
-          # the uninstaller re-launches itself from %TEMP%, so -Wait returns before
-          # the files are gone: poll rather than race it
-          $q = Start-Process -FilePath $uninstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
-          if ($q.ExitCode -ne 0) { throw "uninstaller exited $($q.ExitCode)" }
+          # the uninstaller re-launches itself from %TEMP%, so -Wait returns before the
+          # files are gone: poll rather than race it
+          $q = Start-Process -FilePath $uninstaller `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($q.ExitCode -ne 0) {
+            Emit-Failure "uninstaller exited $($q.ExitCode)"
+            throw "uninstaller exited $($q.ExitCode)"
+          }
           $gone = $false
           for ($i = 0; $i -lt 60; $i++) {
             Start-Sleep -Milliseconds 500
-            if (-not (Test-Path (Join-Path $installed "HassAmbilights.exe"))) { $gone = $true; break }
+            if (-not (Test-Path $exe)) { $gone = $true; break }
           }
-          if (-not $gone) { throw "the exe survived the uninstall" }
+          if (-not $gone) {
+            Emit-Failure "the exe survived the uninstall"
+            throw "the exe survived the uninstall"
+          }
 
-          # and everything else it ever wrote is gone too
-          if (Test-Path $data) { throw "the settings folder survived: $data" }
-          if (Test-Path $logs) { throw "the log folder survived: $logs" }
-          if (Test-Path $installed) { throw "the install folder survived: $installed" }
-          $runKey = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
-            -Name "HassAmbilights" -ErrorAction SilentlyContinue
-          if ($runKey) { throw "the Start-with-Windows entry survived the uninstall" }
+          $left = @()
+          if (Test-Path $data) { $left += "settings $data" }
+          if (Test-Path $logs) { $left += "logs $logs" }
+          if (Test-Path $installed) { $left += "install dir $installed" }
+          if (Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+                -Name "HassAmbilights" -ErrorAction SilentlyContinue) { $left += "Run key" }
+          if ($left.Count -gt 0) {
+            Emit-Failure ("the clean reset left: " + ($left -join ", "))
+            throw ("uninstall left: " + ($left -join ", "))
+          }
           Write-Host "uninstall was a clean reset: program, settings, logs and login entry gone"
 
       - name: Upload the exe and the installer

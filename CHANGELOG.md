@@ -8,6 +8,32 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.15.0] — 2026-11-13
+
+### Added
+- **A Windows installer**, and the app builds its own: `packaging/hass-ambilights.iss` is
+  Inno Setup 6, per-user under `%LOCALAPPDATA%\Programs\HASS Ambilights` (no admin prompt),
+  with a Start menu shortcut, an optional desktop icon and a working uninstaller. The release
+  now carries `HassAmbilights-Setup-<version>.exe` and `SHA256SUMS.txt` beside the portable
+  exe, and the Windows CI job installs the installer silently, runs the installed exe,
+  uninstalls it and checks the cleanup — so a broken installer fails the build, not the user.
+- **A first-run wizard** at `/welcome`: Home Assistant address, long-lived token with a live
+  connection test, lights listed by area with a zone picker per light, then "start with
+  Windows". Every launch path lands there until a token *and* a light map exist, and the
+  settings page links back to it for a re-map.
+- **Automatic updates, with a policy the user sets.** `UPDATE_MODE` (Server card, or env) is
+  `apply` (check, download, verify, install, restart), `download` (check and fetch, wait for a
+  click), `check` (default: notify only) or `off` (no checks). The installer is only ever run
+  when the release's `SHA256SUMS.txt` carries a matching SHA-256; a failed check clears the
+  offer, and an auto-install of the same version is not retried for 24 hours so a failing
+  installer cannot loop. `UPDATE_CHECK=0` still means `off`.
+
+### Changed
+- **Uninstalling now wipes the app**, including `%APPDATA%\HassAmbilights` (address, token,
+  calibration, zones, light map) and `%LOCALAPPDATA%\HassAmbilights` (logs), and the
+  Start-with-Windows entry — a clean reset, so a reinstall starts at the wizard. The uninstaller
+  asks first and names the paths; silent uninstalls delete without asking.
+
 ## [2.14.0] — 2026-11-12
 
 ### Changed

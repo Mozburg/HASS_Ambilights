@@ -80,21 +80,128 @@ jobs:
           Write-Host "health ok, version $version"
           $page = Invoke-WebRequest -Uri "http://127.0.0.1:8123/" -UseBasicParsing -TimeoutSec 5
           if ($page.Content -notmatch "HASS Ambilights") { throw "settings page did not render" }
+          # a fresh install has no token, so the wizard must be what a first run lands on
+          $welcome = Invoke-WebRequest -Uri "http://127.0.0.1:8123/welcome" -UseBasicParsing -TimeoutSec 5
+          if ($welcome.Content -notmatch "Set up HASS Ambilights") { throw "/welcome did not render" }
+          $update = Invoke-RestMethod -Uri "http://127.0.0.1:8123/api/update" -TimeoutSec 5
+          if ($update.current -ne $version) { throw "updater reports $($update.current), exe says $version" }
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           if ($version -ne "$((Get-Content hass_ambilights.py | Select-String '__version__ = "([0-9.]+)"').Matches.Groups[1].Value)") {
             throw "exe reports $version, source says something else"
           }
 
-      - name: Upload the exe
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is not available on this runner" }
+
+          $version = (python packaging/make_assets.py --version).Trim()
+          if (-not $version) { throw "could not read __version__" }
+          & $iscc "/DAppVersion=$version" "packaging\hass-ambilights.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)" }
+
+          $setup = "dist\HassAmbilights-Setup-$version.exe"
+          if (-not (Test-Path $setup)) { throw "$setup was not produced" }
+
+          $sums = foreach ($file in @("dist\HassAmbilights.exe", $setup)) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $file -Leaf)"
+          }
+          $sums | Set-Content -Encoding ascii "dist\SHA256SUMS.txt"
+          Get-Content "dist\SHA256SUMS.txt" | Write-Host
+
+      - name: Install, run from the install path, then uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (python packaging/make_assets.py --version).Trim()
+          $setup = "dist\HassAmbilights-Setup-$version.exe"
+          $installed = Join-Path $env:LOCALAPPDATA "Programs\HASS Ambilights"
+          $data = Join-Path $env:APPDATA "HassAmbilights"
+
+          # the installer must be able to run with no interaction at all
+          $p = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
+          if (-not (Test-Path (Join-Path $installed "HassAmbilights.exe"))) {
+            throw "the exe is not under $installed"
+          }
+          $uninstaller = Join-Path $installed "unins000.exe"
+          if (-not (Test-Path $uninstaller)) { throw "no uninstaller was written" }
+          # [Run] is skipifsilent: a silent install must not leave the app behind,
+          # or the health check below would talk to the wrong process
+          if (Get-Process HassAmbilights -ErrorAction SilentlyContinue) {
+            throw "the silent install started the app - [Run] must stay skipifsilent"
+          }
+
+          # and the installed copy is a working app, with the updater able to find itself
+          $proc = Start-Process -FilePath (Join-Path $installed "HassAmbilights.exe") `
+            -ArgumentList "--server", "--no-browser" -PassThru `
+            -Environment @{ BIND_PORT = "8125"; DRY_RUN = "1"; HA_URL = "http://127.0.0.1:9" }
+          $ok = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $h = Invoke-RestMethod -Uri "http://127.0.0.1:8125/health" -TimeoutSec 2
+              if ($h.version -eq $version) { $ok = $true }
+              break
+            } catch { }
+            if ($proc.HasExited) { break }
+          }
+          if (-not $ok) { throw "the installed exe never answered /health as $version" }
+          Write-Host "installed app answered /health as $version"
+
+          # the uninstall is a clean reset: settings, logs and program folder all go,
+          # so seed both data folders and prove none of it survives
+          $cfg = Join-Path $data "config.json"
+          $logs = Join-Path $env:LOCALAPPDATA "HassAmbilights\logs"
+          '{"HA_URL":"http://127.0.0.1:9"}' | Set-Content -Encoding ascii $cfg
+          New-Item -ItemType Directory -Force -Path $logs | Out-Null
+          'line' | Set-Content -Encoding ascii (Join-Path $logs "app.log")
+          New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+            -Name "HassAmbilights" -Value "C:\gone.exe" -PropertyType String -Force | Out-Null
+
+          # the uninstaller re-launches itself from %TEMP%, so -Wait returns before
+          # the files are gone: poll rather than race it
+          $q = Start-Process -FilePath $uninstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($q.ExitCode -ne 0) { throw "uninstaller exited $($q.ExitCode)" }
+          $gone = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (-not (Test-Path (Join-Path $installed "HassAmbilights.exe"))) { $gone = $true; break }
+          }
+          if (-not $gone) { throw "the exe survived the uninstall" }
+
+          # and everything else it ever wrote is gone too
+          if (Test-Path $data) { throw "the settings folder survived: $data" }
+          if (Test-Path $logs) { throw "the log folder survived: $logs" }
+          if (Test-Path $installed) { throw "the install folder survived: $installed" }
+          $runKey = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" `
+            -Name "HassAmbilights" -ErrorAction SilentlyContinue
+          if ($runKey) { throw "the Start-with-Windows entry survived the uninstall" }
+          Write-Host "uninstall was a clean reset: program, settings, logs and login entry gone"
+
+      - name: Upload the exe and the installer
         uses: actions/upload-artifact@v4
         with:
           name: HassAmbilights-windows
-          path: dist/HassAmbilights.exe
+          path: |
+            dist/HassAmbilights.exe
+            dist/HassAmbilights-Setup-*.exe
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/HassAmbilights.exe
+          files: |
+            dist/HassAmbilights.exe
+            dist/HassAmbilights-Setup-*.exe
+            dist/SHA256SUMS.txt
           fail_on_unmatched_files: true

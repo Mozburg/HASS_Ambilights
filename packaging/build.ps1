@@ -1,5 +1,8 @@
-# Build HassAmbilights.exe (one file, no console). Run from the repo root:
+# Build HassAmbilights.exe (one file, no console) and the installer. Run from the
+# repo root:
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+#
+# Needs Inno Setup 6 for the installer step: https://jrsoftware.org/isdl.php
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
@@ -32,6 +35,28 @@ Invoke-Step { python -m PyInstaller --noconfirm --clean --onefile --windowed `
 
 if (-not (Test-Path "dist/HassAmbilights.exe")) { throw "dist/HassAmbilights.exe was not produced" }
 
+$version = (python packaging/make_assets.py --version).Trim()
+if (-not $version) { throw "could not read __version__ from hass_ambilights.py" }
+
+# The installer is the thing the auto-updater downloads, so it is built from the
+# same exe and carries the same version.
+$iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+if (-not (Test-Path $iscc)) { throw "Inno Setup 6 not found at $iscc - install it from jrsoftware.org" }
+Invoke-Step { & $iscc "/DAppVersion=$version" "packaging\hass-ambilights.iss" } "Inno Setup"
+
+$setup = "dist/HassAmbilights-Setup-$version.exe"
+if (-not (Test-Path $setup)) { throw "$setup was not produced" }
+
+# The updater refuses a download it cannot verify, so the release needs this file.
+$sums = foreach ($file in @("dist/HassAmbilights.exe", $setup)) {
+    $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+    "$hash  $(Split-Path $file -Leaf)"
+}
+$sums | Set-Content -Encoding ascii "dist/SHA256SUMS.txt"
+
 Write-Host ""
-Write-Host "Built dist\HassAmbilights.exe" -ForegroundColor Green
+Write-Host "Built:" -ForegroundColor Green
+Write-Host "  dist\HassAmbilights.exe"
+Write-Host "  $setup"
+Write-Host "  dist\SHA256SUMS.txt"
 Write-Host "Unsigned, so Windows SmartScreen will warn on first run."

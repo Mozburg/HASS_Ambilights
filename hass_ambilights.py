@@ -192,7 +192,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.14.0"
+__version__ = "2.15.0"
 
 
 # ---------------------------------------------------------------- config ----
@@ -688,6 +688,7 @@ UI_HTML = r"""<!DOCTYPE html>
 <main>
   <div>
     <div id="loaderror"></div>
+    <div id="updatebanner" hidden></div>
     <div id="settings"></div>
 
     <div class="card">
@@ -709,6 +710,7 @@ UI_HTML = r"""<!DOCTYPE html>
       <button class="btn primary" id="save" type="button">Save &amp; apply</button>
       <button class="btn" id="revert" type="button">Revert</button>
       <button class="btn danger" id="reset" type="button">Reset to defaults</button>
+      <a class="btn" href="/welcome">Setup wizard</a>
       <small class="mono" id="version"></small>
       <small class="mono" id="cfgpath"></small>
     </div>
@@ -1970,9 +1972,58 @@ async function testConnection() {
     $("connstatus").style.color = "var(--bad)";
   }
 }
+async function pollUpdate() {
+  let u;
+  try {
+    u = await fetch("/api/update").then((r) => r.json());
+  } catch (e) {
+    return;                                  // the banner is optional furniture
+  }
+  const box = $("updatebanner");
+  if (!u.available) { box.hidden = true; return; }
+  box.hidden = false;
+  box.className = "banner";
+  let what = `Version <b>${esc(u.latest)}</b> is available (you have ${esc(u.current)}).`;
+  if (u.mode === "apply" && u.installable) {
+    what += u.applying ? " Installing…" : " It installs itself; nothing to do.";
+  } else if (u.downloaded && u.installable) {
+    what += " Downloaded and verified - ready to install.";
+  } else if (u.download_error) {
+    what += " The download failed: " + esc(u.download_error);
+  } else if (u.downloading) {
+    what += " Downloading…";
+  }
+  box.innerHTML = what + " "
+    + (u.installable && !(u.mode === "apply")
+        ? '<button class="btn primary" id="doupdate" type="button">Install now</button> '
+        : "")
+    + `<a href="${esc(u.url)}" target="_blank" rel="noopener">release notes</a>`;
+  const btn = $("doupdate");
+  if (btn) btn.onclick = installUpdate;
+}
+
+async function installUpdate() {
+  const btn = $("doupdate");
+  if (btn) { btn.disabled = true; btn.textContent = "Installing…"; }
+  try {
+    const r = await fetch("/api/update", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "install" }),
+    }).then((x) => x.json());
+    if (!r.ok) throw new Error(r.detail || r.error || "the installer did not start");
+  } catch (e) {
+    const box = $("updatebanner");
+    box.hidden = false;
+    box.className = "banner";
+    box.textContent = "Update failed: " + e.message;
+  }
+}
+
 window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
+pollUpdate();
+setInterval(pollUpdate, 60000);
 reload()
   .then(() => { tick(); setInterval(tick, 1000); })
   .catch((e) => {
@@ -2119,6 +2170,12 @@ SETTINGS.extend([
     _spec("START_WITH_WINDOWS", "bool", False, "Server", "Start with Windows",
           "Adds a login entry that starts the app in the tray. Windows only; takes "
           "effect as soon as you save.",),
+    _spec("UPDATE_MODE", "enum", "check", "Server", "Automatic updates",
+          "What the app may do without asking. apply = check, download, install and "
+          "restart; download = check and fetch the installer, then wait for a click; "
+          "check = tell you a release exists; off = no checks at all. The installed "
+          "Windows build is the only one that can install itself.",
+          values=["apply", "download", "check", "off"]),
     _spec("BIND_PORT", "int", 8000, "Server", "Listen port",
           "TCP port for the settings UI. Needs a restart.", min=1, max=65535, restart=True),
 ])
@@ -4280,6 +4337,729 @@ def first_free_port(host: str, first: int, limit: int = 12) -> int:
     return first
 
 
+# ------------------------------------------------------------ first run ----
+def setup_needed() -> bool:
+    """True until Home Assistant is reachable and at least one light is mapped.
+
+    A token with no light map (or the reverse) is a half-finished install, so the
+    wizard is the landing page until both are there.
+    """
+    return not HA_TOKEN or not str(LIGHT_MAP or "").strip()
+
+
+def landing_url(url: str) -> str:
+    """The wizard until the install is complete, then the settings page."""
+    return url + "welcome" if setup_needed() else url
+
+
+# The wizard is deliberately a page of its own rather than a mode inside the
+# settings page: a first run has nothing to save yet, and every control the big
+# page needs (blend sliders, zones, calibration) is noise before a token works.
+WIZARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Ccircle cx='11' cy='11' r='6' fill='%23ff5c5c'/%3E%3Ccircle cx='21' cy='11' r='6' fill='%2344d17a'/%3E%3Ccircle cx='11' cy='21' r='6' fill='%234493f8'/%3E%3Ccircle cx='21' cy='21' r='6' fill='%23ffd226'/%3E%3C/svg%3E">
+<title>Set up HASS Ambilights</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#2b333d; --text:#e6edf3; --muted:#8b949e;
+    --accent:#4493f8; --ok:#3fb950; --bad:#f85149; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);min-height:100vh;
+    font:14px/1.45 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
+  a{color:var(--accent)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .wrap{max-width:680px;margin:0 auto;padding:32px 20px 60px}
+  h1{font-size:20px;margin:0 0 6px;font-weight:600}
+  .sub{color:var(--muted);margin:0 0 22px}
+  .steps{display:flex;gap:8px;margin:0 0 20px;font-size:12px;color:var(--muted)}
+  .steps span{padding:5px 10px;border:1px solid var(--line);border-radius:999px}
+  .steps span.on{color:var(--text);border-color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+  label{display:block;font-size:12px;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--muted);margin:14px 0 6px}
+  label:first-child{margin-top:0}
+  input[type=text],input[type=password],select{
+    width:100%;padding:9px 11px;background:#0d1117;border:1px solid var(--line);
+    border-radius:8px;color:var(--text);font:inherit}
+  .hint{color:var(--muted);font-size:12px;margin-top:6px}
+  .actions{display:flex;gap:10px;align-items:center;margin-top:20px;flex-wrap:wrap}
+  .btn{padding:9px 16px;border-radius:8px;border:1px solid var(--line);background:#1f2630;
+    color:var(--text);font:inherit;cursor:pointer}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .btn:disabled{opacity:.5;cursor:default}
+  .status{font-size:13px;min-height:18px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  .lights{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:6px}
+  .light{display:flex;gap:10px;align-items:center;padding:9px 11px;border-top:1px solid var(--line)}
+  .light:first-child{border-top:0}
+  .light .name{flex:1;min-width:0}
+  .light .name small{display:block;color:var(--muted)}
+  .light select{width:150px;flex:none}
+  .badge{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .badge.warn{border-color:#8a6d1f;color:#d29922}
+  .done{font-size:15px}
+  [hidden]{display:none}
+  .skip{margin-left:auto;color:var(--muted);font-size:12px}
+  code{background:#0d1117;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Set up HASS Ambilights</h1>
+  <p class="sub">Three steps: connect to Home Assistant, pick the lights, done.
+    Everything here is saved to your user profile, not into the program folder.</p>
+  <div class="steps">
+    <span id="tab1" class="on">1 · Connect</span>
+    <span id="tab2">2 · Lights</span>
+    <span id="tab3">3 · Finish</span>
+  </div>
+
+  <div class="card" id="step1">
+    <label for="url">Home Assistant address</label>
+    <input type="text" id="url" placeholder="http://homeassistant.local:8123" spellcheck="false">
+    <div class="hint">Include the port. <code>https://</code> is fine if your instance has a
+      certificate your PC trusts.</div>
+
+    <label for="token">Long-lived access token</label>
+    <input type="password" id="token" placeholder="paste the token" spellcheck="false">
+    <div class="hint">In Home Assistant: your profile → Security → Long-lived access tokens →
+      Create token. It is stored in <code>secrets.json</code> next to your settings and never
+      shown again.</div>
+
+    <div class="actions">
+      <button class="btn" id="test" type="button">Test connection</button>
+      <button class="btn primary" id="next1" type="button" disabled>Continue</button>
+      <span class="status" id="status1"></span>
+      <a class="skip" href="/">Skip</a>
+    </div>
+  </div>
+
+  <div class="card" id="step2" hidden>
+    <label>Lights to drive</label>
+    <div class="hint" id="lightnote">Reading the light list from Home Assistant…</div>
+    <div class="lights" id="lights"></div>
+    <div class="actions">
+      <button class="btn primary" id="next2" type="button">Continue</button>
+      <button class="btn" id="back1" type="button">Back</button>
+      <span class="status" id="status2"></span>
+    </div>
+  </div>
+
+  <div class="card" id="step3" hidden>
+    <p class="done" id="summary">Ready.</p>
+    <label style="text-transform:none;letter-spacing:0;font-size:13px;color:var(--text)">
+      <input type="checkbox" id="autostart" style="width:auto;margin-right:8px">
+      Start HASS Ambilights when I sign in to Windows
+    </label>
+    <div class="actions">
+      <button class="btn primary" id="finish" type="button">Finish</button>
+      <button class="btn" id="back2" type="button">Back</button>
+      <span class="status" id="status3"></span>
+    </div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const ZONE_NAMES = ["top left", "top", "top right", "left", "centre", "right",
+                    "bottom left", "bottom", "bottom right"];
+let ZONE_COUNT = 9;
+let LIGHTS = [];
+const PICKED = new Map();          // entity_id -> zone spec ("1-9", "5", ...)
+
+function showStep(n) {
+  for (const i of [1, 2, 3]) {
+    $("step" + i).hidden = i !== n;
+    $("tab" + i).classList.toggle("on", i <= n);
+  }
+}
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  };
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((data.errors || [data.error || data.detail || r.statusText]).join("; "));
+  return data;
+}
+
+function zoneOptions() {
+  const whole = `<option value="1-${ZONE_COUNT}">whole screen</option>`;
+  const named = ZONE_COUNT === 9 && ZONE_NAMES.length === 9;
+  let out = whole;
+  for (let z = 1; z <= ZONE_COUNT; z++) {
+    out += `<option value="${z}">${named ? ZONE_NAMES[z - 1] : "zone " + z}</option>`;
+  }
+  return out;
+}
+
+async function loadConfig() {
+  const cfg = await api("/api/config");
+  if (cfg.zone_count) ZONE_COUNT = cfg.zone_count;
+  $("url").value = cfg.ha_url || "http://homeassistant.local:8123";
+  if (cfg.ha_token_set) {
+    $("token").placeholder = "saved - leave empty to keep it";
+    $("next1").disabled = false;
+    // an existing install can go straight to re-picking lights
+    $("status1").textContent = "already set up - re-run any step you need";
+    $("status1").className = "status";
+  }
+  const map = (cfg.settings && cfg.settings.LIGHT_MAP) || "";
+  for (const chunk of map.split(";")) {
+    const [entity, zones] = chunk.split("=");
+    if (entity && entity.trim().startsWith("light.")) PICKED.set(entity.trim(), (zones || "").trim());
+  }
+}
+
+async function testConnection() {
+  $("status1").textContent = "testing…";
+  $("status1").className = "status";
+  $("next1").disabled = true;
+  try {
+    const body = { HA_URL: $("url").value.trim() };
+    if ($("token").value.trim()) body.HA_TOKEN = $("token").value.trim();
+    const r = await api("/api/test-connection", body);
+    $("status1").textContent = (r.ok ? "✔ " : "✖ ") + r.detail;
+    $("status1").className = "status " + (r.ok ? "ok" : "bad");
+    $("next1").disabled = !r.ok;
+  } catch (e) {
+    $("status1").textContent = "✖ " + e.message;
+    $("status1").className = "status bad";
+  }
+}
+
+async function saveConnection() {
+  const body = { HA_URL: $("url").value.trim() };
+  const typed = $("token").value.trim();
+  if (typed) body.HA_TOKEN = typed;
+  const r = await api("/api/config", body);
+  if (r.connection && r.connection.ok === false) {
+    throw new Error("saved, but Home Assistant still says: " + r.connection.detail);
+  }
+  $("token").value = "";
+  $("token").placeholder = "saved - leave empty to keep it";
+  return r;
+}
+
+function renderLights() {
+  const box = $("lights");
+  if (!LIGHTS.length) {
+    box.innerHTML = `<div class="light"><span class="name">No lights found. Add lights in
+      Home Assistant first, then reload this page.</span></div>`;
+    return;
+  }
+  let html = "";
+  let area = null;
+  for (const l of LIGHTS) {
+    if (l.area !== area) {
+      area = l.area;
+      html += `<div class="light" style="color:var(--muted);text-transform:uppercase;
+        font-size:11px;letter-spacing:.06em">${esc(area || "no area")}</div>`;
+    }
+    const on = PICKED.has(l.entity_id);
+    html += `<div class="light">
+      <input type="checkbox" data-entity="${esc(l.entity_id)}" ${on ? "checked" : ""}>
+      <span class="name">${esc(l.name)}
+        <small>${esc(l.entity_id)}${on ? " · " + esc(PICKED.get(l.entity_id)) : ""}</small></span>
+      ${l.color_capable ? "" : '<span class="badge warn" title="no colour channel: it will only dim">no colour</span>'}
+      <select data-entity="${esc(l.entity_id)}" ${on ? "" : "disabled"}>
+        ${zoneOptions()}
+      </select>
+    </div>`;
+  }
+  box.innerHTML = html;
+  for (const sel of box.querySelectorAll("select")) {
+    const entity = sel.dataset.entity;
+    const want = PICKED.get(entity);
+    if (want) {
+      // a saved spec may be "4,5" or a range; the select shows the simple forms
+      const match = [...sel.options].find((o) => o.value === want);
+      if (match) {
+        sel.value = want;
+      } else {
+        const custom = document.createElement("option");
+        custom.value = want;
+        custom.textContent = "zones " + want;
+        sel.appendChild(custom);
+        sel.value = want;
+      }
+    }
+  }
+  box.onchange = (ev) => {
+    const t = ev.target;
+    const entity = t.dataset.entity;
+    if (!entity) return;
+    if (t.tagName === "SELECT") {
+      if (PICKED.has(entity)) PICKED.set(entity, t.value);
+      return;
+    }
+    if (t.checked) {
+      PICKED.set(entity, `1-${ZONE_COUNT}`);
+      const sel = box.querySelector(`select[data-entity="${entity}"]`);
+      if (sel) sel.disabled = false;
+    } else {
+      PICKED.delete(entity);
+      const sel = box.querySelector(`select[data-entity="${entity}"]`);
+      if (sel) sel.disabled = true;
+    }
+    renderLights();
+  };
+}
+
+async function fetchLights() {
+  $("lightnote").textContent = "Reading the light list from Home Assistant…";
+  try {
+    const r = await api("/api/lights?refresh=true");
+    if (!r.ok) throw new Error(r.detail || "Home Assistant did not answer");
+    LIGHTS = r.lights || [];
+    $("lightnote").textContent = LIGHTS.length
+      ? `${LIGHTS.length} light(s) - tick the ones this screen should drive.`
+      : "No lights found.";
+    renderLights();
+  } catch (e) {
+    $("lightnote").textContent = "Could not read the lights: " + e.message;
+    $("lightnote").className = "hint bad";
+  }
+}
+
+function mapSpec() {
+  // one entry per light, in reading order: light.x=1-9;light.y=5
+  return [...PICKED.entries()].map(([entity, zones]) => `${entity}=${zones || `1-${ZONE_COUNT}`}`)
+    .join(";");
+}
+
+$("test").onclick = testConnection;
+$("next1").onclick = async () => {
+  try {
+    await saveConnection();
+  } catch (e) {
+    $("status1").textContent = "✖ " + e.message;
+    $("status1").className = "status bad";
+    return;
+  }
+  showStep(2);
+  fetchLights();
+};
+$("back1").onclick = () => showStep(1);
+$("next2").onclick = () => {
+  if (!PICKED.size) {
+    $("status2").textContent = "pick at least one light";
+    $("status2").className = "status bad";
+    return;
+  }
+  $("status2").textContent = "";
+  $("summary").textContent =
+    `${PICKED.size} light(s) will follow the screen. You can change zones and everything `
+    + "else later in the settings page.";
+  showStep(3);
+};
+$("back2").onclick = () => showStep(2);
+$("finish").onclick = async () => {
+  $("status3").textContent = "saving…";
+  $("status3").className = "status";
+  try {
+    await api("/api/config", {
+      LIGHT_MAP: mapSpec(),
+      START_WITH_WINDOWS: $("autostart").checked,
+    });
+    $("status3").textContent = "✔ saved - starting";
+    $("status3").className = "status ok";
+    setTimeout(() => { location.href = "/"; }, 700);
+  } catch (e) {
+    $("status3").textContent = "✖ " + e.message;
+    $("status3").className = "status bad";
+  }
+};
+
+loadConfig().catch((e) => {
+  $("status1").textContent = "could not read the current settings: " + e.message;
+  $("status1").className = "status bad";
+});
+</script>
+</body>
+</html>
+"""
+
+
+# --------------------------------------------------------------- updates ----
+# One updater, driven by GitHub releases: the same release the Windows workflow
+# publishes carries the installer, so the app never needs its own server.
+UPDATE_API = _env("UPDATE_API", "https://api.github.com").rstrip("/")
+UPDATE_REPO = _env("UPDATE_REPO", "Mozburg/HASS_Ambilights")
+UPDATE_MODES = ("apply", "download", "check", "off")
+# What the app may do on its own, in order of how much it takes on:
+#   apply    = check, download, install and restart - fully automatic
+#   download = check and fetch the installer, then wait for one click
+#   check    = tell the user a release exists, nothing else
+#   off      = no checks at all; the endpoint can still be asked by hand
+UPDATE_MODE = (_env("UPDATE_MODE", "").strip().lower()
+               or ("check" if _env("UPDATE_CHECK", "1") != "0" else "off"))
+if UPDATE_MODE not in UPDATE_MODES:
+    UPDATE_MODE = "check"
+UPDATE_INTERVAL = max(1.0, float(_env("UPDATE_INTERVAL_HOURS", "6"))) * 3600.0
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases"
+UPDATE_STATE = {
+    "current": __version__, "latest": "", "available": False, "installable": False,
+    "url": RELEASES_URL, "asset": "", "sums": "", "assets": {}, "notes": "",
+    "error": None, "checked_at": 0.0, "checking": False, "applying": False,
+    "mode": UPDATE_MODE, "downloaded": False, "downloaded_for": "",
+    "downloaded_path": "", "download_error": None, "downloading": False,
+}
+_update_lock = threading.Lock()
+
+
+def update_policy() -> str:
+    """The mode in force now, normalised: apply | download | check | off.
+
+    Read at call time, not captured, so a save from the settings page takes effect
+    on the next check without a restart.
+    """
+    mode = str(globals().get("UPDATE_MODE") or "").strip().lower()
+    if mode in ("auto", "automatic", "install"):
+        return "apply"
+    return mode if mode in UPDATE_MODES else "check"
+
+
+def update_attempt_path() -> Path:
+    return CONFIG_PATH.with_name(".update_attempt")
+
+
+def already_attempted(version: str, within: float = 86400.0) -> bool:
+    """Has this exact version been auto-installed recently?
+
+    An installer that fails leaves the old build running, which would otherwise
+    find the same update and try again on every check.
+    """
+    try:
+        recorded, stamp = update_attempt_path().read_text(encoding="utf-8").split()[:2]
+        return recorded == version and time.time() - float(stamp) < within
+    except (OSError, ValueError):
+        return False
+
+
+def record_attempt(version: str) -> None:
+    try:
+        update_attempt_path().write_text(f"{version} {time.time():.0f}", encoding="utf-8")
+    except OSError as exc:
+        log.debug("could not record the update attempt: %s", exc)
+
+
+def version_key(text: str) -> tuple[int, ...] | None:
+    """'v2.15.0' -> (2, 15, 0); None for anything that is not a release version."""
+    match = re.fullmatch(r"v?(\d+(?:\.\d+)*)", str(text or "").strip())
+    return tuple(int(part) for part in match.group(1).split(".")) if match else None
+
+
+def newer_version(latest: str, current: str) -> bool:
+    """Is `latest` a later release than `current`? Missing parts count as zero."""
+    a, b = version_key(latest), version_key(current)
+    if not a or not b:
+        return False
+    width = max(len(a), len(b))
+    return a + (0,) * (width - len(a)) > b + (0,) * (width - len(b))
+
+
+def release_assets(payload: dict) -> dict[str, str]:
+    """name -> download URL, for the assets of one release payload."""
+    assets = {}
+    for asset in payload.get("assets") or []:
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if name and url:
+            assets[name] = url
+    return assets
+
+
+def installer_asset(assets) -> str | None:
+    """The Setup exe in a release, if there is one."""
+    for name in sorted(assets):
+        lowered = name.lower()
+        if lowered.startswith("hassambilights-setup") and lowered.endswith(".exe"):
+            return name
+    return None
+
+
+def sums_asset(assets) -> str | None:
+    for name in sorted(assets):
+        if name.lower() in ("sha256sums.txt", "sha256sums", "checksums.txt"):
+            return name
+    return None
+
+
+def parse_sums(text: str) -> dict[str, str]:
+    """'<hash>  name' (or 'name: hash') -> {name: hash}, lower-case hashes."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line and " " not in line.split(":", 1)[0]:
+            name, _, digest = line.partition(":")
+            name, digest = name.strip(), digest.strip()
+        else:
+            parts = line.replace("*", " ").split()
+            if len(parts) < 2:
+                continue
+            digest, name = parts[0], " ".join(parts[1:])
+        if re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            out[name.split("/")[-1]] = digest.lower()
+    return out
+
+
+def update_snapshot() -> dict:
+    with _update_lock:
+        state = dict(UPDATE_STATE)
+    state["mode"] = update_policy()
+    state["downloaded"] = bool(state.get("downloaded_for")) and \
+        state.get("downloaded_for") == state.get("latest")
+    return state
+
+
+def _update_set(**fields) -> None:
+    with _update_lock:
+        UPDATE_STATE.update(fields)
+
+
+def check_update(force: bool = False) -> dict:
+    """Ask GitHub for the latest release and remember the answer.
+
+    Never raises: an offline box, a rate limit or a repo with no releases is
+    reported through `error` and the app carries on unwatched.
+    """
+    state = update_snapshot()
+    if state["checking"]:
+        return state
+    if not force and time.time() - state["checked_at"] < UPDATE_INTERVAL:
+        return state
+    _update_set(checking=True)
+    try:
+        response = requests.get(
+            f"{UPDATE_API}/repos/{UPDATE_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github+json",
+                     "User-Agent": f"hass-ambilights/{__version__}"},
+            timeout=REQUEST_TIMEOUT + 4)
+        if response.status_code == 404:
+            raise RuntimeError("no published release yet")
+        if response.status_code == 403:
+            raise RuntimeError("GitHub rate limit - try again later")
+        if response.status_code != 200:
+            raise RuntimeError(f"GitHub answered HTTP {response.status_code}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("GitHub returned nonsense")
+        assets = release_assets(payload)
+        latest = str(payload.get("tag_name") or payload.get("name") or "").strip()
+        setup = installer_asset(assets)
+        fields = {
+            "latest": latest.lstrip("vV"),
+            "available": newer_version(latest, __version__),
+            "installable": bool(setup) and os.name == "nt" and FROZEN,
+            "url": str(payload.get("html_url") or RELEASES_URL),
+            "asset": setup or "",
+            "sums": sums_asset(assets) or "",
+            "assets": assets,
+            "notes": str(payload.get("body") or "")[:4000],
+            "error": None,
+            "checked_at": time.time(),
+        }
+    except Exception as exc:                    # offline, DNS, timeout, bad JSON
+        log.debug("update check failed: %s", exc)
+        # clear the offer: a stale "update available" that cannot be downloaded
+        # is worse than no banner, and the next check runs on its own
+        fields = {"error": str(exc), "checked_at": time.time(), "available": False,
+                  "installable": False, "asset": "", "sums": "", "assets": {}}
+    _update_set(checking=False, **fields)
+    return update_snapshot()
+
+
+def download_update(directory: Path | None = None) -> tuple[Path | None, str]:
+    """Fetch the release installer into a temp folder and prove its checksum.
+
+    Returns (path, "") or (None, why). The hash is compared against the
+    SHA256SUMS.txt asset when the release carries one; without a hash the
+    download is refused, because an unverified exe is worse than no update.
+    """
+    import hashlib
+    import tempfile
+
+    state = update_snapshot()
+    name = state.get("asset") or ""
+    if not name:
+        return None, "this release has no installer to download"
+    assets = state.get("assets") or {}
+    url = assets.get(name)
+    if not url:
+        return None, "the release listing changed - check again"
+    # the checksum list first: no point pulling 60 MB we cannot verify
+    sums_name = state.get("sums") or ""
+    if not sums_name:
+        return None, "the release has no SHA256SUMS.txt, so the download cannot be verified"
+    sums_url = assets.get(sums_name)
+    if not sums_url:
+        return None, "the release has no SHA256SUMS.txt, so the download cannot be verified"
+    try:
+        listing = requests.get(sums_url, timeout=REQUEST_TIMEOUT + 10)
+    except requests.RequestException as exc:
+        return None, f"could not read the checksum file: {exc}"
+    wanted = parse_sums(getattr(listing, "text", "") or "").get(name)
+    if not wanted:
+        return None, f"SHA256SUMS.txt has no line for {name}"
+
+    target_dir = Path(directory or tempfile.mkdtemp(prefix="hass-ambilights-update-"))
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return None, f"could not create {target_dir}: {exc}"
+    target = target_dir / name
+    digest = hashlib.sha256()
+    try:
+        with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT + 30) as response:
+            if response.status_code != 200:
+                return None, f"download failed: HTTP {response.status_code}"
+            with open(target, "wb") as handle:
+                for chunk in response.iter_content(chunk_size=1 << 16):
+                    if chunk:
+                        digest.update(chunk)
+                        handle.write(chunk)
+                        if handle.tell() > 200 << 20:
+                            return None, "the download is unexpectedly large - refusing it"
+    except (requests.RequestException, OSError) as exc:
+        return None, f"download failed: {exc}"
+
+    actual = digest.hexdigest()
+    if actual != wanted:
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        return None, f"checksum mismatch - refusing to run the download ({actual[:12]}…)"
+    return target, ""
+
+
+def installer_command(path: Path) -> list[str]:
+    """Silent install, then start the app again - whether that worked or not."""
+    exe = Path(sys.executable)
+    inner = (f'start /wait "" "{path}" /SILENT /SUPPRESSMSGBOXES /NORESTART '
+             f'& start "" "{exe}"')
+    return ["cmd.exe", "/c", inner]
+
+
+def exit_for_update(delay: float = 1.2) -> None:
+    """Leave the room so the installer can replace the exe that is running."""
+    def go() -> None:
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        os._exit(0)
+
+    timer = threading.Timer(delay, go)
+    timer.daemon = True
+    timer.start()
+
+
+def apply_update() -> tuple[bool, str]:
+    """Download, verify, hand over to the installer, then exit. Windows only."""
+    import subprocess
+
+    if os.name != "nt" or not FROZEN:
+        return False, "installing from here only works in the installed Windows build"
+    state = update_snapshot()
+    if state["applying"]:
+        return False, "an update is already being installed"
+    if not state["available"]:
+        return False, "no newer release is known - check for updates first"
+    _update_set(applying=True)
+    path = None
+    prefetched = Path(str(state.get("downloaded_path") or ""))
+    # a file this process already hashed is used as-is; anything else is fetched
+    if state.get("downloaded_for") == state.get("latest") and prefetched.is_file():
+        path = prefetched
+    if path is None:
+        path, error = download_update()
+        if error:
+            _update_set(applying=False, error=error)
+            return False, error
+    try:
+        subprocess.Popen(installer_command(path), close_fds=True,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    except OSError as exc:
+        _update_set(applying=False, error=str(exc))
+        return False, f"could not start the installer: {exc}"
+    log.info("installing %s from %s", state.get("latest"), path)
+    exit_for_update()
+    return True, "installing"
+
+
+def prefetch_update() -> dict:
+    """Download and verify now, so an install is one click and no wait."""
+    state = update_snapshot()
+    if not state.get("available") or not state.get("asset"):
+        return state
+    if state.get("downloaded_for") == state.get("latest") and \
+            Path(str(state.get("downloaded_path") or "")).is_file():
+        return state
+    _update_set(downloading=True)
+    path, error = download_update()
+    if error:
+        log.debug("update prefetch failed: %s", error)
+        _update_set(downloading=False, download_error=error)
+        return update_snapshot()
+    _update_set(downloading=False, download_error=None,
+                downloaded_for=state["latest"], downloaded_path=str(path))
+    return update_snapshot()
+
+
+def maybe_autoupdate() -> dict:
+    """One pass of whatever the current mode allows. Never raises."""
+    mode = update_policy()
+    if mode == "off":
+        return update_snapshot()
+    state = check_update()
+    if not state.get("available"):
+        return state
+    if mode in ("download", "apply"):
+        state = prefetch_update()
+    if mode == "apply" and state.get("available") and state.get("installable"):
+        if already_attempted(str(state.get("latest") or "")):
+            log.info("not retrying %s: the last attempt did not take", state.get("latest"))
+            return state
+        record_attempt(str(state.get("latest") or ""))
+        ok, detail = apply_update()
+        if not ok:
+            log.warning("automatic update to %s failed: %s", state.get("latest"), detail)
+    return update_snapshot()
+
+
+def start_update_watch() -> None:
+    """One pass at boot, then every UPDATE_INTERVAL - as far as the mode allows."""
+    if update_policy() == "off":
+        log.info("automatic updates are off (UPDATE_MODE=off)")
+        return
+
+    def loop() -> None:
+        # never compete with the first frames: the capture thread has the GPU
+        if stop_event.wait(8.0):
+            return
+        while not stop_event.is_set():
+            try:
+                maybe_autoupdate()
+            except Exception as exc:            # polling must never kill the thread
+                log.debug("update watch: %s", exc)
+            if stop_event.wait(UPDATE_INTERVAL):
+                return
+
+    threading.Thread(target=loop, name="update-watch", daemon=True).start()
+
+
 # ------------------------------------------------------------------- web ----
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -4298,6 +5078,7 @@ async def lifespan(_app: FastAPI):
     poster = threading.Thread(target=sender_loop, name="sender", daemon=True)
     worker.start()
     poster.start()
+    start_update_watch()
     try:
         yield
     finally:
@@ -4368,6 +5149,32 @@ def health():
 def index_page():
     # no-store: a UI edit must not need a hard refresh to appear
     return HTMLResponse(UI_HTML, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/welcome")
+def welcome_page():
+    """First-run wizard. Also the place to re-map lights without the big page."""
+    return HTMLResponse(WIZARD_HTML, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/update")
+def get_update():
+    return update_snapshot()
+
+
+@app.post("/api/update")
+def post_update(payload: dict = Body(default={})):
+    """check: ask GitHub now. install: download, verify, run the installer."""
+    action = str((payload or {}).get("action") or "check").strip().lower()
+    if action == "check":
+        return check_update(force=True)
+    if action == "install":
+        ok, detail = apply_update()
+        if not ok:
+            return JSONResponse({**update_snapshot(), "ok": False, "detail": detail},
+                                status_code=409)
+        return {**update_snapshot(), "ok": True, "detail": detail}
+    return JSONResponse({"ok": False, "detail": f"unknown action {action!r}"}, status_code=400)
 
 
 # what is on disk, so the UI can tell "changed" from "saved"
@@ -5383,11 +6190,11 @@ def _run() -> None:
             log.error("another instance is already serving %s - exiting", url)
             raise SystemExit(3)
         if mode == "window" and gui_available():
-            run_window(url)
+            run_window(landing_url(url))
         else:
             import webbrowser
 
-            webbrowser.open(url)
+            webbrowser.open(landing_url(url))
         return
 
     if mode == "server":
@@ -5413,11 +6220,11 @@ def _run() -> None:
 
     url = f"http://{host_for_url(host)}:{port}/"
     if mode == "server":
-        if not HA_TOKEN and not args.no_browser:
-            # nothing to mirror yet: hand the user the settings page
+        if setup_needed() and not args.no_browser:
+            # nothing to mirror yet: hand the user the setup wizard
             import webbrowser
 
-            threading.Timer(1.0, webbrowser.open, (url,)).start()
+            threading.Timer(1.0, webbrowser.open, (landing_url(url),)).start()
         log.info("serving on http://%s:%s", BIND_HOST, port)
         close_splash()
         uvicorn.run(app, host=BIND_HOST, port=port, log_config=None)
@@ -5436,7 +6243,7 @@ def _run() -> None:
     except OSError:
         pass
     try:
-        code = run_window(url) if mode == "window" else run_tray(url)
+        code = run_window(landing_url(url)) if mode == "window" else run_tray(url)
     finally:
         request_shutdown()
         thread.join(timeout=5)

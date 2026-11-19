@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.14.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.15.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -30,19 +30,52 @@ web UI for every knob, and a colour pipeline that actually matches the panel.
 
 ### Windows
 
-Download `HassAmbilights.exe` from the [latest release](../../releases/latest) and run it.
-It opens a window with the settings page. **Closing the window hides it to the tray** and
-mirroring carries on — use the tray icon to reopen it or quit for real. Turn off
-*Close to tray* in the Server card if you would rather closing quit the app. It is
-unsigned, so Windows SmartScreen shows "unknown publisher" the first time —
-*More info → Run anyway*.
+Download `HassAmbilights-Setup-2.15.0.exe` from the [latest release](../../releases/latest)
+and run it. It installs for the current user only — no admin prompt — into
+`%LOCALAPPDATA%\Programs\HASS Ambilights`, adds a Start menu shortcut (and a desktop one if
+you tick the box), and starts the app. It is unsigned, so Windows SmartScreen shows
+"unknown publisher" the first time — *More info → Run anyway*.
+
+The portable `HassAmbilights.exe` from the same release still works if you would rather not
+install anything: same program, no shortcut, no uninstaller.
+
+**First run is a wizard**, not the settings page: it asks for your Home Assistant address
+and a long-lived access token, tests the connection, lists your lights, and writes the light
+map from what you tick. It is also at <http://127.0.0.1:8000/welcome> afterwards, via
+*Setup wizard* on the settings page.
+
+**Updates.** The installed build watches GitHub releases — at startup and every six hours —
+and what it does about a newer one is yours to decide (*Automatic updates* in the Server card,
+or `UPDATE_MODE`):
+
+| `UPDATE_MODE` | without asking you, the app… |
+| --- | --- |
+| `apply` | checks, downloads, verifies the SHA-256, installs and restarts |
+| `download` | checks, downloads and verifies; waits for one click to install |
+| `check` (default) | tells you in a banner; one click downloads and installs |
+| `off` | does nothing at all — no checks, no banner |
+
+Every mode uses the same rule for the bytes: the release's `SHA256SUMS.txt` must contain a
+line for the file and the hash must match, or nothing is run. A failed check clears the
+banner instead of leaving an update on offer that cannot be fetched, and an auto-install of
+the same version is not retried for a day, so a broken installer cannot loop. Portable
+copies and script checkouts are never updated in place — they get the release link.
+`UPDATE_CHECK=0` from an older setup still means `off`.
 
 - Settings live in `%APPDATA%\HassAmbilights`, logs in `%LOCALAPPDATA%\HassAmbilights\logs`.
-- **Start with Windows** (Server card) adds a login entry that launches it in the tray;
-  the tray has *Open settings* and *Quit*.
+- **Uninstalling is a clean reset.** It removes the program, both of those folders — the Home
+  Assistant address and token, calibration, zones, light map, every setting, the logs — and the
+  Start-with-Windows entry. The uninstaller asks before doing it, and says exactly which paths
+  go. Silent uninstalls (`/VERYSILENT`) skip the prompt and delete anyway.
+- **Start with Windows** (Server card, or the wizard's last step) adds a login entry that
+  launches it in the tray; the tray has *Open settings* and *Quit*.
 - Only one copy runs at a time — launching again focuses the running one, and a busy port
   picks the next free one.
-- Build it yourself with `powershell -ExecutionPolicy Bypass -File packaging\build.ps1`.
+- Closing the window hides it to the tray and mirroring carries on; turn off *Close to tray*
+  in the Server card if you would rather closing quit the app.
+- Build both yourself with `powershell -ExecutionPolicy Bypass -File packaging\build.ps1`
+  (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)); `dist\` ends up with the exe, the
+  installer and `SHA256SUMS.txt`.
 
 ### Script
 
@@ -395,6 +428,12 @@ current version.
 ```bash
 python tests/test_hass_ambilights.py      # 17 phases, fake screen + mock HA, no display needed
 ```
+
+The suite also covers the installer and updater contract: the version comparison, the
+release asset the updater picks, checksum parsing and refusal, the first-run predicate, and
+that `packaging/hass-ambilights.iss`, the workflow and the updater still agree on names.
+The Windows CI job goes further — it builds the installer, installs it silently, runs the
+installed exe, uninstalls it and checks the user's settings survived.
 
 The test suite covers the colour maths (white point, sRGB primaries, linear averaging),
 zone splitting, per-light dedupe and rescue, stale-frame dropping, BUSY handling,

@@ -2051,4 +2051,279 @@ assert m.stats["posts"] >= 1, "never resumed after the controller came back"
 print("phase K: controller-down 500 -> %d stalls, resumed with %d posts"
       % (m.stats["radio_stalls"], m.stats["posts"]))
 
+# --- updates: version compare, asset pick, checksums, quiet failures -------
+assert m.newer_version("v2.15.0", "2.14.0") is True
+assert m.newer_version("2.15.0", "2.15.0") is False
+assert m.newer_version("2.15", "2.15.0") is False
+assert m.newer_version("2.15.1", "2.15") is True
+assert m.newer_version("3.0.0", "2.99.99") is True
+assert m.newer_version("2.14.9", "2.15.0") is False
+for junk in ("nightly", "", None, "2.15.0-rc1"):
+    assert m.newer_version(junk, "2.15.0") is False, junk
+assert m.version_key("v2.15.0") == (2, 15, 0)
+assert m.version_key("2.15.0-rc1") is None
+
+_assets = {"HassAmbilights.exe": "u1", "HassAmbilights-Setup-2.15.0.exe": "u2",
+           "SHA256SUMS.txt": "u3", "notes.md": "u4"}
+assert m.installer_asset(_assets) == "HassAmbilights-Setup-2.15.0.exe"
+assert m.installer_asset({"HassAmbilights.exe": "u"}) is None, "the portable exe is not an installer"
+assert m.sums_asset(_assets) == "SHA256SUMS.txt"
+assert m.sums_asset({"checksums.txt": "u"}) == "checksums.txt"
+_digest = "a1" * 32
+assert m.parse_sums("%s  HassAmbilights-Setup-2.15.0.exe" % _digest) == {
+    "HassAmbilights-Setup-2.15.0.exe": _digest}
+assert m.parse_sums("%s *HassAmbilights.exe" % _digest) == {"HassAmbilights.exe": _digest}
+assert m.parse_sums("HassAmbilights.exe: %s" % _digest) == {"HassAmbilights.exe": _digest}
+assert m.parse_sums("not a checksum line\n\n# comment") == {}
+assert m.parse_sums("deadbeef  short-hash.exe") == {}, "a truncated hash must not verify anything"
+
+
+class _FakeHTTP:
+    def __init__(self, code=200, payload=None, text=""):
+        self.status_code = code
+        self._payload = payload
+        self.text = text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+_RELEASE = {
+    "tag_name": "v99.1.0", "html_url": "https://example.invalid/release", "body": "notes",
+    "assets": [
+        {"name": "HassAmbilights.exe", "browser_download_url": "https://example.invalid/portable.exe"},
+        {"name": "HassAmbilights-Setup-99.1.0.exe",
+         "browser_download_url": "https://example.invalid/setup.exe"},
+        {"name": "SHA256SUMS.txt", "browser_download_url": "https://example.invalid/sums"},
+    ],
+}
+_orig_get = m.requests.get
+_calls = []
+
+
+def _fake_get(url, **kwargs):
+    _calls.append(url)
+    if url.endswith("/releases/latest"):
+        return _FakeHTTP(200, _RELEASE)
+    if url.endswith("/sums"):
+        return _FakeHTTP(200, text="no usable line here\n")
+    raise AssertionError("unexpected download: " + url)
+
+
+m.requests.get = _fake_get
+_saved_update = dict(m.UPDATE_STATE)
+try:
+    m.UPDATE_STATE.update({"checked_at": 0.0, "available": False, "latest": "", "error": None})
+    _state = m.check_update(force=True)
+    assert _state["available"] is True, _state
+    assert _state["latest"] == "99.1.0" and _state["current"] == m.__version__
+    assert _state["asset"] == "HassAmbilights-Setup-99.1.0.exe", _state["asset"]
+    assert _state["sums"] == "SHA256SUMS.txt"
+    assert _state["notes"].startswith("notes")
+    assert _state["installable"] is False, "only an installed Windows build installs itself"
+    assert _state["error"] is None
+    assert any("/repos/" in call for call in _calls), _calls
+
+    # a checksum list without our file is a refusal, not a blind run
+    _path, _why = m.download_update(Path(tempfile.mkdtemp()))
+    assert _path is None and "SHA256SUMS.txt" in _why, _why
+
+    # and with no checksum asset at all the download never starts
+    m.UPDATE_STATE.update({"sums": "", "asset": "x.exe",
+                           "assets": {"x.exe": "https://example.invalid/x"}})
+    _before = len(_calls)
+    _path, _why = m.download_update(Path(tempfile.mkdtemp()))
+    assert _path is None and "verified" in _why, _why
+    assert len(_calls) == _before, "it fetched bytes it could never verify"
+
+    # a failed check must not keep offering the update it found last time
+    def _offline(url, **kwargs):
+        raise m.requests.ConnectionError("offline")
+
+    m.requests.get = _offline
+    m.UPDATE_STATE.update({"checked_at": 0.0, "available": True,
+                           "asset": "HassAmbilights-Setup-99.1.0.exe"})
+    _state = m.check_update(force=True)
+    assert _state["available"] is False and _state["asset"] == "", _state
+    assert "offline" in (_state["error"] or ""), _state["error"]
+
+    _ok, _why = m.apply_update()
+    assert _ok is False and "Windows" in _why, _why
+    assert m.post_update({"action": "install"}).status_code == 409
+    assert m.post_update({"action": "nuke"}).status_code == 400
+    assert m.get_update()["current"] == m.__version__
+finally:
+    m.requests.get = _orig_get
+    m.UPDATE_STATE.clear()
+    m.UPDATE_STATE.update(_saved_update)
+print("updater ok: version compare, asset pick, checksum refusal, quiet offline")
+
+# --- update policy: four modes, and only one of them acts alone -----------
+_saved_mode = m.UPDATE_MODE
+_saved_state = dict(m.UPDATE_STATE)
+_orig_get = m.requests.get
+_orig_dl = m.download_update
+_orig_apply = m.apply_update
+_orig_check = m.check_update
+_policy_calls = []
+_tmp_setup = Path(tempfile.mkdtemp()) / "HassAmbilights-Setup-99.1.0.exe"
+_tmp_setup.write_bytes(b"MZ fake installer")
+
+
+def _release_get(url, **kwargs):
+    _policy_calls.append(("get", url))
+    if url.endswith("/releases/latest"):
+        return _FakeHTTP(200, _RELEASE)
+    raise AssertionError("no download expected here: " + url)
+
+
+def _fake_download(directory=None):
+    _policy_calls.append(("download", directory))
+    return _tmp_setup, ""
+
+
+try:
+    # a bad or legacy value never becomes "do the wrong thing"
+    m.UPDATE_MODE = "nonsense"
+    assert m.update_policy() == "check"
+    m.UPDATE_MODE = "auto"
+    assert m.update_policy() == "apply"
+    for _mode in ("apply", "download", "check", "off"):
+        m.UPDATE_MODE = _mode
+        assert m.update_policy() == _mode
+    assert set(m.UPDATE_MODES) == {"apply", "download", "check", "off"}
+    assert m.SETTINGS_BY_NAME["UPDATE_MODE"]["values"] == ["apply", "download", "check", "off"]
+    assert m.SETTINGS_BY_NAME["UPDATE_MODE"]["default"] == "check", "the default must not self-install"
+
+    # off: no requests, no poller, no download
+    m.UPDATE_MODE = "off"
+    m.UPDATE_STATE.update({"checked_at": 0.0, "available": False})
+    m.requests.get = _release_get
+    m.download_update = _fake_download
+    m.maybe_autoupdate()
+    m.start_update_watch()
+    assert _policy_calls == [], _policy_calls
+    assert not any(t.name == "update-watch" for t in threading.enumerate()), \
+        "UPDATE_MODE=off still started the watchdog"
+
+    # check: look, tell, stop
+    m.UPDATE_MODE = "check"
+    m.UPDATE_STATE.update({"checked_at": 0.0, "available": False, "downloaded_for": ""})
+    _policy_calls.clear()
+    _state = m.maybe_autoupdate()
+    assert _state["available"] is True and _state["mode"] == "check", _state
+    assert [c[0] for c in _policy_calls] == ["get"], _policy_calls
+    assert _state["downloaded"] is False
+
+    # download: fetch and verify, never install
+    m.UPDATE_MODE = "download"
+    m.UPDATE_STATE.update({"checked_at": 0.0, "downloaded_for": "", "downloaded_path": ""})
+    _policy_calls.clear()
+    _state = m.maybe_autoupdate()
+    assert ("download", None) in _policy_calls, _policy_calls
+    assert _state["downloaded"] is True and _state["downloaded_for"] == _state["latest"], _state
+    assert _state["applying"] is False
+
+    # apply: install, but the same version is not attempted twice. installable is
+    # forced here because it is False off Windows and outside a frozen build - the
+    # OS gate itself is asserted in the section above.
+    m.UPDATE_MODE = "apply"
+    m.UPDATE_STATE.update({"checked_at": 0.0, "installable": True, "available": True,
+                           "latest": "99.1.0", "asset": "HassAmbilights-Setup-99.1.0.exe"})
+    m.check_update = lambda force=False: m.update_snapshot()
+    _installs = []
+    m.apply_update = lambda: (_installs.append(1), (True, "installing"))[1]
+    m.update_attempt_path().unlink(missing_ok=True)
+    m.maybe_autoupdate()
+    assert _installs == [1], "apply mode did not install"
+    assert m.already_attempted(_state["latest"]) is True, "the attempt was not recorded"
+    m.UPDATE_STATE.update({"checked_at": 0.0})
+    m.maybe_autoupdate()
+    assert _installs == [1], "an install that did not take must not be retried in a loop"
+
+    # an install that reports failure leaves the state honest
+    m.update_attempt_path().unlink(missing_ok=True)
+    m.apply_update = lambda: (False, "installer said no")
+    m.UPDATE_STATE.update({"checked_at": 0.0})
+    _state = m.maybe_autoupdate()
+    assert _state["available"] is True, "a failed install must not hide the update"
+finally:
+    m.requests.get = _orig_get
+    m.download_update = _orig_dl
+    m.apply_update = _orig_apply
+    m.check_update = _orig_check
+    m.UPDATE_MODE = _saved_mode
+    m.UPDATE_STATE.clear()
+    m.UPDATE_STATE.update(_saved_state)
+    try:
+        m.update_attempt_path().unlink(missing_ok=True)
+    except OSError:
+        pass
+print("update policy ok: apply / download / check / off, and no install loops")
+
+# --- first run: the wizard is the landing page until it is configured -----
+_saved_ha = (m.HA_TOKEN, m.LIGHT_MAP)
+m.HA_TOKEN, m.LIGHT_MAP = "", ""
+assert m.setup_needed() is True
+assert m.landing_url("http://h:1/") == "http://h:1/welcome"
+m.HA_TOKEN = "token"
+assert m.setup_needed() is True, "a token with no lights is a half-finished install"
+m.LIGHT_MAP = "light.desk_lamp=1-%d" % m.ZONE_COUNT
+assert m.setup_needed() is False
+assert m.landing_url("http://h:1/") == "http://h:1/"
+m.LIGHT_MAP = ""
+m.HA_TOKEN = ""
+assert m.setup_needed() is True, "a light map with no token cannot mirror anything"
+m.HA_TOKEN, m.LIGHT_MAP = _saved_ha
+
+_page = m.welcome_page()
+_body = _page.body.decode()
+assert _page.status_code == 200
+assert "Set up HASS Ambilights" in _body
+for piece in ('id="url"', 'id="token"', "id=\"test\"", "/api/test-connection",
+              "/api/config", "/api/lights?refresh=true", 'id="autostart"'):
+    assert piece in _body, piece
+assert 'href="/welcome"' in m.UI_HTML, "the settings page needs a way back to the wizard"
+assert m.UI_HTML.count("/welcome") >= 1
+
+# the map the wizard writes must parse, and one light on one zone must survive
+_spec = "light.desk_lamp=1-%d;light.strip=1" % m.ZONE_COUNT
+_targets = m.parse_light_map(_spec)
+assert [t.entity_id for t in _targets] == ["light.desk_lamp", "light.strip"], _targets
+assert _targets[0].zones == frozenset(range(1, m.ZONE_COUNT + 1))
+assert _targets[1].zones == frozenset({1})
+print("first run ok: wizard landing page, setup predicate, wizard map parses")
+
+# --- the release the updater reads is the one the workflow publishes ------
+_root = Path(m.__file__).resolve().parent
+_iss = _root / "packaging" / "hass-ambilights.iss"
+assert _iss.exists(), "no Inno Setup script - there is no installer to publish"
+_script = _iss.read_text(encoding="utf-8")
+for piece in ("OutputBaseFilename=HassAmbilights-Setup-{#AppVersion}",
+              "AppId={{7B2F4C6E-9A31-4D5E-8C7A-3F1E6D2B9C40}",
+              "PrivilegesRequired=lowest", "DefaultDirName={localappdata}",
+              "CloseApplications=yes", "skipifsilent", "uninsdeletevalue",
+              'Source: "..\\dist\\{#AppExe}"'):
+    assert piece in _script, "the installer lost: " + piece
+assert "desktopicon" in _script and "[UninstallRun]" in _script
+_flow = (_root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8")
+for piece in ("hass-ambilights.iss", "HassAmbilights-Setup-*.exe", "SHA256SUMS.txt",
+              "/VERYSILENT", "unins000.exe"):
+    assert piece in _flow, "the release workflow lost: " + piece
+
+# uninstall is a clean reset, and it says so before it does it
+for piece in (r'Name: "{userappdata}\HassAmbilights"', r'Name: "{localappdata}\HassAmbilights"',
+              "InitializeUninstall", "UninstallSilent", "cannot be undone"):
+    assert piece in _script, "the uninstaller lost: " + piece
+assert "survived" in _flow and "clean reset" in _flow, \
+    "CI must prove the uninstall removed the settings, not that it kept them"
+_build = (_root / "packaging" / "build.ps1").read_text(encoding="utf-8")
+for piece in ("hass-ambilights.iss", "SHA256SUMS.txt", "make_assets.py --version"):
+    assert piece in _build, "the local build lost: " + piece
+# the name the workflow writes is the name the updater picks, at this version
+assert m.installer_asset({"HassAmbilights-Setup-%s.exe" % m.__version__: "u"}) is not None
+print("packaging ok: installer script, workflow and updater agree on names")
+
 print("ALL CHECKS PASSED")

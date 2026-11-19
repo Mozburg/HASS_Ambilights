@@ -36,5 +36,6 @@
   "BIND_HOST": "127.0.0.1",
   "CLOSE_TO_TRAY": true,
   "START_WITH_WINDOWS": false,
+  "UPDATE_MODE": "check",
   "BIND_PORT": 8000
 }

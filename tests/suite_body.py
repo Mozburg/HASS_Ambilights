@@ -2305,7 +2305,7 @@ for piece in ("OutputBaseFilename=HassAmbilights-Setup-{#AppVersion}",
               "AppId={{7B2F4C6E-9A31-4D5E-8C7A-3F1E6D2B9C40}",
               "PrivilegesRequired=lowest", "DefaultDirName={localappdata}",
               "CloseApplications=yes", "skipifsilent",
-              "ArchitecturesAllowed=x64",      # not x64compatible: needs Inno 6.3+
+              "ArchitecturesAllowed=x64compatible",   # needs Inno 6.3+
               'Source: "..\\dist\\{#AppExe}"'):
     assert piece in _script, "the installer lost: " + piece
 assert "desktopicon" in _script and "[UninstallRun]" in _script

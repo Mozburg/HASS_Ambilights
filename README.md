@@ -74,7 +74,7 @@ copies and script checkouts are never updated in place — they get the release 
 - Closing the window hides it to the tray and mirroring carries on; turn off *Close to tray*
   in the Server card if you would rather closing quit the app.
 - Build both yourself with `powershell -ExecutionPolicy Bypass -File packaging\build.ps1`
-  (needs [Inno Setup 6](https://jrsoftware.org/isdl.php)); `dist\` ends up with the exe, the
+  (needs [Inno Setup 6.3+](https://jrsoftware.org/isdl.php)); `dist\` ends up with the exe, the
   installer and `SHA256SUMS.txt`.
 
 ### Script

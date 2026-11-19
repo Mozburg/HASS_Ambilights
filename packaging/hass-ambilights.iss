@@ -8,9 +8,9 @@
 ;
 ; Uninstalling is a clean reset: program files, settings, logs and the login entry.
 ;
-; Kept deliberately plain - "x64" rather than the newer "x64compatible", and reg.exe
-; rather than a [Registry] ValueType - so any Inno Setup 6.x on a build machine can
-; compile it.
+; Needs Inno Setup 6.3 or newer (x64compatible). reg.exe does the login-entry cleanup
+; rather than a [Registry] entry, and [Code] uses Chr() instead of #13#10, because this
+; script enables the preprocessor and a line starting with # is a directive.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -49,8 +49,8 @@ UninstallDisplayName={#AppName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 ; The app is a tray program: Restart Manager closes it during an upgrade, and the
 ; /SILENT path the built-in updater uses depends on this being on.
 CloseApplications=yes
@@ -96,20 +96,22 @@ Type: filesandordirs; Name: "{localappdata}\HassAmbilights"
 
 [Code]
 function InitializeUninstall(): Boolean;
+var
+  NL, Msg: String;
 begin
   Result := True;
   // Never block a silent uninstall: that path is the CI check and a scripted reset.
   if UninstallSilent() then
     Exit;
-  Result := MsgBox(
-    'Uninstalling HASS Ambilights also deletes everything it saved:' + #13#10 +
-    #13#10 +
-    '  ' + ExpandConstant('{userappdata}\HassAmbilights') + #13#10 +
-    '      your Home Assistant address and access token,' + #13#10 +
-    '      your calibration, zones, light map and every other setting' + #13#10 +
-    '  ' + ExpandConstant('{localappdata}\HassAmbilights') + #13#10 +
-    '      the logs' + #13#10 +
-    #13#10 +
-    'This is a clean reset and cannot be undone. Uninstall and delete all of it?',
-    mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  // Chr(), not #13#10: this script uses the preprocessor, and a line that starts with
+  // #13 is read as a preprocessor directive ("Unknown preprocessor directive").
+  NL := Chr(13) + Chr(10);
+  Msg := 'Uninstalling HASS Ambilights also deletes everything it saved:' + NL + NL;
+  Msg := Msg + '  ' + ExpandConstant('{userappdata}\HassAmbilights') + NL;
+  Msg := Msg + '      your Home Assistant address and access token,' + NL;
+  Msg := Msg + '      your calibration, zones, light map and every other setting' + NL;
+  Msg := Msg + '  ' + ExpandConstant('{localappdata}\HassAmbilights') + NL;
+  Msg := Msg + '      the logs' + NL + NL;
+  Msg := Msg + 'This is a clean reset and cannot be undone. Uninstall and delete all of it?';
+  Result := MsgBox(Msg, mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
 end;

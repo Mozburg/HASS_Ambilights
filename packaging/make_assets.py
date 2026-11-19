@@ -63,6 +63,10 @@ def make_version_info(path: Path, ver: str) -> None:
 
 
 def main() -> None:
+    if "--version" in sys.argv[1:]:
+        # the installer and the workflow both need this without building anything
+        print(version())
+        return
     ver = version()
     icon = HERE / "icon.ico"
     info = HERE / "version_info.txt"

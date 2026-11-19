@@ -2329,4 +2329,43 @@ for piece in ("hass-ambilights.iss", "SHA256SUMS.txt", "make_assets.py --version
 assert m.installer_asset({"HassAmbilights-Setup-%s.exe" % m.__version__: "u"}) is not None
 print("packaging ok: installer script, workflow and updater agree on names")
 
+# --- a chromaticity asked for too much level must not change hue -----------
+# Regression: rgb was rebuilt at the *region's* mean luminance while holding the cluster's
+# chromaticity. A saturated red needing 4.2x full red clamped and went pink - which is what
+# value-mode brightness and the dE deadband then read, and what a calibrated light got.
+_page = np.full((36, 64, 3), 255, dtype=np.uint8)
+_page[14:22, 26:38] = (200, 30, 30)
+_lin_page = m._srgb_to_linear(_page.astype(np.float32) / 255.0)
+_cb, _sc, _bb = m.COLOUR_BLEND, m.BRIGHTNESS_FOLLOW_COLOUR, m.BRIGHTNESS_BLEND
+m.COLOUR_BLEND, m.BRIGHTNESS_FOLLOW_COLOUR, m.BRIGHTNESS_BLEND = 1.0, False, 0.0
+try:
+    _c = m._apply_dominant(m.aggregate(_lin_page))
+    assert _c["xy"][0] > 0.5, _c["xy"]                     # the red block won
+    assert _c["luminance"] > 0.9, "this case keeps the region's level: %.3f" % _c["luminance"]
+    assert max(_c["rgb"]) == 255, _c["rgb"]
+    assert _c["rgb"][1] < 60, "the green channel was clipped up into pink: %s" % (_c["rgb"],)
+
+    _cal = {"black": 0, "grey": 128, "white": 255,
+            "cap_red": 1.0, "cap_green": 1.0, "cap_blue": 1.0, "white_scale": 1.0}
+    _c["white"] = m.is_white(_c)
+    m.apply_calibration(_c, _cal)
+    assert max(_c["rgb"]) == 255 and _c["rgb"][1] < 60, \
+        "calibration rebuilt the clipped colour: %s" % (_c["rgb"],)
+    # the chip and the fields must describe the same colour, not two neighbours
+    assert m.delta_e(_c["rgb"], m.preview_colour(_c)["rgb"]) < 2.0, \
+        (_c["rgb"], m.preview_colour(_c)["rgb"])
+finally:
+    m.COLOUR_BLEND, m.BRIGHTNESS_FOLLOW_COLOUR, m.BRIGHTNESS_BLEND = _cb, _sc, _bb
+
+# a full-luminance request for a primary is its own colour at full chrome, not a wash
+assert m.rgb_at_level((0.64, 0.33), 1.0)[0] == 255
+assert m.rgb_at_level((0.64, 0.33), 1.0)[1] < 30, m.rgb_at_level((0.64, 0.33), 1.0)
+assert m.rgb_at_level((0.15, 0.06), 1.0)[2] == 255 and m.rgb_at_level((0.15, 0.06), 1.0)[0] < 30
+# below the ceiling it is an ordinary reconstruction: a grey at half level is half grey
+_grey = m.rgb_at_level(m.D65_XY, 0.5)
+assert 120 < _grey[0] < 200 and _grey[0] == _grey[1] == _grey[2], _grey
+_dim = m.rgb_at_level((0.64, 0.33), 0.05)
+assert max(_dim) < 255 and _dim[0] > 40, _dim
+print("hue preservation ok: no level can clip a chromaticity into another colour")
+
 print("ALL CHECKS PASSED")

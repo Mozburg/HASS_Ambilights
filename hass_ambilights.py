@@ -2841,7 +2841,8 @@ def aggregate(cells_lin: np.ndarray) -> dict:
                 dx, dy = _uv_to_xy((mu + colour_blend * (du - mu),
                                     mv + colour_blend * (dv - mv)))
             out["dominant"] = [round(dx, 4), round(dy, 4)]
-            out["rgb_dominant"] = srgb_from_xy((dx, dy), max(level, 1e-4))
+            # the cluster's chromaticity at the level we send, never clipped into another hue
+            out["rgb_dominant"] = rgb_at_level((dx, dy), level)
     return out
 
 
@@ -3093,7 +3094,7 @@ def apply_calibration(colour: dict, cal: dict) -> dict:
     scale = float(cal.get("white_scale", 1.0))
     if colour.get("white") and scale != 1.0:
         colour["kelvin_scale"] = scale
-    colour["rgb"] = srgb_from_xy(tuple(colour["xy"]), max(colour.get("luminance", 0.0), 1e-4))
+    colour["rgb"] = rgb_at_level(tuple(colour["xy"]), colour.get("luminance") or 0.0)
     if "dominant" in colour:
         colour["dominant"] = colour["xy"]
     return colour
@@ -3200,6 +3201,21 @@ def render_rgb(xy, level: float) -> list[int]:
     peak = float(max(lin.max(), 1e-6))
     lin = np.clip(lin / peak * max(level, 1e-4), 0.0, 1.0)
     return srgb_from_linear(lin)
+
+
+def rgb_at_level(xy, level: float) -> list[int]:
+    """This chromaticity at this luminance - as bright as the hue can actually go.
+
+    A saturated red asked for the region's mean luminance (0.96) needs red = 4.2, so
+    solving at that level clamps the channel and the answer is pink, not red. Clamp the
+    *level* to what the chromaticity can emit at full chrome and the hue is preserved
+    exactly; below the ceiling this is the ordinary reconstruction.
+    """
+    lin = np.array(_linear_rgb_from_xy(xy, 1.0), dtype=np.float32)
+    peak = float(max(lin.max(), 1e-6))
+    # Y at full chrome, not at Y = 1: the level argument sets Y, so lin already has Y = 1
+    ceiling = float(_linear_to_xyz(lin / peak)[1])
+    return srgb_from_linear(_linear_rgb_from_xy(xy, min(max(float(level), 1e-6), max(ceiling, 1e-6))))
 
 
 def preview_colour(colour: dict) -> dict:
@@ -4180,17 +4196,17 @@ def capture_loop() -> None:
                     colour = dict(full)     # identical by construction, already computed
                 else:
                     colour = aggregate(cells_for(target, lin, zone_cells))
-                if "dominant" in colour:
-                    colour["xy"] = colour["dominant"]
-                    colour["rgb"] = colour.pop("rgb_dominant", colour["rgb"])
+                # Colour and level in one step, so everything below - calibration, the
+                # white-mode decision, dedupe - reads a colour whose xy and luminance came
+                # from the same blend. Splitting them made a calibrated light rebuild its
+                # rgb at the region's mean level while holding the cluster's chromaticity:
+                # the reconstruction clips to pink and value-mode brightness pins at 255.
+                _apply_dominant(colour)
                 # decided on the measured colour, before any calibration moves it
                 colour["white"] = is_white(colour)
                 cal = calibration_for(target.entity_id)
                 if cal:
                     apply_calibration(colour, cal)
-                # outside the branch: with the colour at mean and the brightness
-                # blend at 1 there is no "dominant" key, and the level was dropped
-                colour["luminance"] = colour.pop("dominant_luminance", colour["luminance"])
                 # The mode is decided from measured frames, not from sends: a static
                 # white screen must still be able to settle onto the kelvin channel, and
                 # dedupe would otherwise mean the state never advances at all.

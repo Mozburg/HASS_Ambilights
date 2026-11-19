@@ -94,35 +94,61 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Find Inno, or install it. The runner image usually has it already, but the
-          # version differs between images, which is why the .iss sticks to constructs
-          # every Inno Setup 6.x understands.
+
+          # A failed step only says "exit code 1", and the job log needs repo admin.
+          # Emitting the compiler's own words as an annotation makes the reason visible
+          # on the run page and through the checks API.
+          function Emit-Failure([string]$text) {
+            $flat = ($text -replace "`r?`n", " | ")
+            if ($flat.Length -gt 3000) { $flat = $flat.Substring(0, 3000) + " ..." }
+            Write-Host "::error title=Installer::$flat"
+          }
+
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) {
-            try { choco install innosetup --no-progress -y } catch { Write-Host "choco failed: $_" }
+            try { choco install innosetup --no-progress -y } catch { Write-Host "choco: $_" }
           }
           if (-not (Test-Path $iscc)) {
             $found = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue |
               Select-Object -First 1
             if ($found) { $iscc = $found.FullName }
           }
-          if (-not (Test-Path $iscc)) { throw "Inno Setup 6 is not available on this runner" }
-          Write-Host "using $iscc"
-          (Get-Item $iscc).VersionInfo.ProductVersion | Write-Host
+          if (-not (Test-Path $iscc)) {
+            Emit-Failure "Inno Setup 6 was not found and choco could not install it"
+            throw "Inno Setup 6 is not available on this runner"
+          }
+          $innoVersion = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "using $iscc ($innoVersion)"
 
           $version = (python packaging/make_assets.py --version).Trim()
-          if (-not $version) { throw "could not read __version__" }
-          & $iscc "/DAppVersion=$version" "packaging\hass-ambilights.iss" 2>&1 | Tee-Object -Variable isccOut
-          if ($LASTEXITCODE -ne 0) {
-            # the log is only visible to admins, so put the compiler's own words where a
-            # failure can be read at a glance
-            "### ISCC failed (exit $LASTEXITCODE)" | Out-File -Append $env:GITHUB_STEP_SUMMARY
-            $isccOut | Out-File -Append $env:GITHUB_STEP_SUMMARY
-            throw ("ISCC failed (exit $LASTEXITCODE): " + ($isccOut -join " | "))
+          if (-not $version) {
+            Emit-Failure "make_assets.py --version printed nothing"
+            throw "could not read __version__"
+          }
+
+          # Start-Process, not `&`: no PowerShell stream semantics, a real exit code, and
+          # stdout/stderr kept apart so a warning cannot masquerade as a failure.
+          $out = Join-Path $env:TEMP "iscc.out"
+          $err = Join-Path $env:TEMP "iscc.err"
+          $proc = Start-Process -FilePath $iscc `
+            -ArgumentList @("/DAppVersion=$version", "packaging\hass-ambilights.iss") `
+            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err
+          $text = @()
+          if (Test-Path $out) { $text += Get-Content $out }
+          if (Test-Path $err) { $text += Get-Content $err }
+          $text | ForEach-Object { Write-Host $_ }
+          if ($proc.ExitCode -ne 0) {
+            Emit-Failure ($text -join "`n")
+            "### ISCC failed (exit $($proc.ExitCode))" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            $text | Out-File -Append $env:GITHUB_STEP_SUMMARY
+            throw "ISCC failed (exit $($proc.ExitCode))"
           }
 
           $setup = "dist\HassAmbilights-Setup-$version.exe"
-          if (-not (Test-Path $setup)) { throw "$setup was not produced" }
+          if (-not (Test-Path $setup)) {
+            Emit-Failure "ISCC reported success but $setup does not exist"
+            throw "$setup was not produced"
+          }
 
           $sums = foreach ($file in @("dist\HassAmbilights.exe", $setup)) {
             $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()

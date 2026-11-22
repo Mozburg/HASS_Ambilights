@@ -193,7 +193,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.15.1"
+__version__ = "2.15.2"
 
 
 # ---------------------------------------------------------------- config ----
@@ -2044,15 +2044,29 @@ async function testConnection() {
     $("connstatus").style.color = "var(--bad)";
   }
 }
+let notifiedVersion = null;
+
 async function pollUpdate() {
   let u;
   try {
-    u = await fetch("/api/update").then((r) => r.json());
+    u = await fetch("/api/update?refresh=1").then((r) => r.json());
   } catch (e) {
     return;                                  // the banner is optional furniture
   }
   const box = $("updatebanner");
   if (!u.available) { box.hidden = true; return; }
+  // The check runs on its own schedule (first pass 8s after boot), so the page cannot ask
+  // once at load and assume the answer is final - that is why a release went unnoticed.
+  if (u.latest && u.latest !== notifiedVersion) {
+    notifiedVersion = u.latest;
+    toast(`Version ${u.latest} is available (you have ${u.current})`);
+    document.title = `(${u.latest}) HASS Ambilights`;
+    const footer = $("version");
+    if (footer && !footer.textContent.includes("update")) {
+      footer.textContent = footer.textContent.replace(/\s*$/, "")
+        + ` · update ${u.latest} available`;
+    }
+  }
   box.hidden = false;
   box.className = "banner";
   let what = `Version <b>${esc(u.latest)}</b> is available (you have ${esc(u.current)}).`;
@@ -2064,6 +2078,10 @@ async function pollUpdate() {
     what += " The download failed: " + esc(u.download_error);
   } else if (u.downloading) {
     what += " Downloading…";
+  } else if (u.mode === "check") {
+    what += " Automatic updates are set to check only - download it from the release page.";
+  } else if (u.mode === "off") {
+    what += " Automatic updates are off.";
   }
   box.innerHTML = what + " "
     + (u.installable && !(u.mode === "apply")
@@ -2095,6 +2113,12 @@ window.addEventListener("beforeunload", (e) => {
   if (dirty) { e.preventDefault(); e.returnValue = ""; }
 });
 pollUpdate();
+// the server checks on its own clock (first pass 8s after boot, then UPDATE_INTERVAL), so the
+// page has to keep asking rather than asking once
+setInterval(pollUpdate, 30000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollUpdate();
+});
 setInterval(pollUpdate, 60000);
 reload()
   .then(() => { tick(); setInterval(tick, 1000); })
@@ -4865,6 +4889,10 @@ UPDATE_MODE = (_env("UPDATE_MODE", "").strip().lower()
 if UPDATE_MODE not in UPDATE_MODES:
     UPDATE_MODE = "check"
 UPDATE_INTERVAL = max(1.0, float(_env("UPDATE_INTERVAL_HOURS", "6"))) * 3600.0
+# how stale the last answer may be before opening the page triggers a fresh check
+REFRESH_PERIOD = 300.0
+# extra passes right after boot (after the first one at 8s), then UPDATE_INTERVAL
+UPDATE_BOOT_BURST = (120.0, 900.0)
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases"
 UPDATE_STATE = {
     "current": __version__, "latest": "", "available": False, "installable": False,
@@ -5030,6 +5058,9 @@ def check_update(force: bool = False) -> dict:
             "error": None,
             "checked_at": time.time(),
         }
+        if fields["available"]:
+            log.info("update available: %s (this is %s, UPDATE_MODE=%s)",
+                     fields["latest"], __version__, update_policy())
     except Exception as exc:                    # offline, DNS, timeout, bad JSON
         log.debug("update check failed: %s", exc)
         # clear the offer: a stale "update available" that cannot be downloaded
@@ -5179,6 +5210,31 @@ def prefetch_update() -> dict:
     return update_snapshot()
 
 
+NOTIFIED_VERSION: dict = {"version": ""}
+
+
+def notify_update(state: dict) -> None:
+    """Tell the user an update exists, once per version, outside the settings page too.
+
+    The app normally runs with its window hidden, so a banner in a page nobody has open is not
+    a notification. The tray icon gets a balloon and the tooltip names the version.
+    """
+    latest = str(state.get("latest") or "")
+    if not state.get("available") or not latest or NOTIFIED_VERSION["version"] == latest:
+        return
+    NOTIFIED_VERSION["version"] = latest
+    message = f"Version {latest} is available (this is {__version__})"
+    log.info("%s - UPDATE_MODE=%s", message, update_policy())
+    icon = TRAY_ICON.get("icon")
+    if icon is not None:
+        try:
+            icon.notify(message, "HASS Ambilights")
+            if hasattr(icon, "title"):
+                icon.title = f"HASS Ambilights {__version__} - {latest} available"
+        except Exception as exc:                 # no tray backend, or no notify support
+            log.debug("tray notification failed: %s", exc)
+
+
 def maybe_autoupdate() -> dict:
     """One pass of whatever the current mode allows. Never raises."""
     mode = update_policy()
@@ -5187,6 +5243,7 @@ def maybe_autoupdate() -> dict:
     state = check_update()
     if not state.get("available"):
         return state
+    notify_update(state)
     if mode in ("download", "apply"):
         state = prefetch_update()
     if mode == "apply" and state.get("available") and state.get("installable"):
@@ -5210,12 +5267,16 @@ def start_update_watch() -> None:
         # never compete with the first frames: the capture thread has the GPU
         if stop_event.wait(8.0):
             return
+        # Three passes early on (8s, +2min, +15min) so a release published while the app was
+        # already running is noticed the same day rather than after a full UPDATE_INTERVAL.
+        waits = list(UPDATE_BOOT_BURST)
         while not stop_event.is_set():
             try:
                 maybe_autoupdate()
             except Exception as exc:            # polling must never kill the thread
                 log.debug("update watch: %s", exc)
-            if stop_event.wait(UPDATE_INTERVAL):
+            gap = waits.pop(0) if waits else UPDATE_INTERVAL
+            if stop_event.wait(gap):
                 return
 
     threading.Thread(target=loop, name="update-watch", daemon=True).start()
@@ -5409,7 +5470,13 @@ def welcome_page():
 
 
 @app.get("/api/update")
-def get_update():
+def get_update(refresh: int = 0):
+    """Current update state; `?refresh=1` re-asks GitHub if the last answer is stale."""
+    if refresh and (time.time() - update_snapshot().get("checked_at", 0) > REFRESH_PERIOD):
+        try:
+            return check_update(force=True)
+        except Exception as exc:                 # check_update does not raise, but be sure
+            log.debug("forced update check failed: %s", exc)
     return update_snapshot()
 
 

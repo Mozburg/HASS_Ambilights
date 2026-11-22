@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.15.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.15.2** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -280,6 +280,19 @@ room without also pulling the colour toward mean — that is what turning it off
 `COLOR_ALGO`, `DOMINANT_MIX` and `DOMINANT_LUMINANCE` still work if you have them in an
 old config or a script: they are folded into the sliders on load (`mean` → 0, `dominant`
 → 1) and hidden from the page.
+
+## Update notifications
+
+`UPDATE_MODE` decides what happens when a newer release exists: `check` (default) tells you and
+leaves the download to you, `download` fetches and verifies the installer, `apply` installs it
+by itself, `off` says nothing. In `check` and `download` the notification appears in three
+places — a tray balloon (once per version), a banner and toast in the settings page, and an
+`update available: …` line in the log — because the app normally runs with its window hidden.
+
+The check runs eight seconds after start-up, again two and fifteen minutes later, then every
+`UPDATE_INTERVAL_HOURS` (6 by default); opening the settings page refreshes an answer older
+than five minutes. `GET /api/update` returns the state and `GET /api/update?refresh=1` forces a
+fresh look.
 
 ## Pausing
 

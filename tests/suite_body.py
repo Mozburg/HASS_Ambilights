@@ -1644,6 +1644,68 @@ finally:
     (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
     m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
 
+# --- update delivery: found, then actually shown ---------------------------
+_mainsrc = open(m.__file__, encoding="utf-8").read()
+_release = {"tag_name": "v9.9.9", "html_url": "https://example.invalid/r",
+            "body": "notes",
+            "assets": [{"name": "HassAmbilights-Setup-9.9.9.exe",
+                        "browser_download_url": "https://example.invalid/setup.exe"},
+                       {"name": "SHA256SUMS.txt",
+                        "browser_download_url": "https://example.invalid/sums.txt"}]}
+
+
+class _FakeRelease:
+    status_code = 200
+
+    def json(self):
+        return _release
+
+
+_original_get = m.requests.get
+m.requests.get = lambda *a, **k: _FakeRelease()
+try:
+    m.NOTIFIED_VERSION["version"] = ""
+    m._update_set(checked_at=0, available=False, latest="")
+    _st = m.check_update(force=True)
+    assert _st["available"] is True and _st["latest"] == "9.9.9", _st
+    assert _st["asset"].endswith("Setup-9.9.9.exe"), _st["asset"]
+
+    # the tray is the only surface when the window is hidden: it must get told
+    class _FakeIcon:
+        def __init__(self):
+            self.notes, self.title = [], ""
+        def notify(self, message, title=""):
+            self.notes.append((title, message))
+
+    _icon = _FakeIcon()
+    m.TRAY_ICON["icon"] = _icon
+    m.notify_update(_st)
+    assert _icon.notes, "an available update must reach the tray"
+    assert "9.9.9" in _icon.notes[0][1], _icon.notes
+    assert "9.9.9" in _icon.title, _icon.title
+    m.notify_update(_st)                      # second pass: no repeat balloon
+    assert len(_icon.notes) == 1, f"the user must be told once, not every pass: {_icon.notes}"
+    m.TRAY_ICON.pop("icon", None)
+
+    # a fresh answer must not hammer GitHub; a stale one must re-ask
+    m._update_set(checked_at=time.time(), available=False, latest="")
+    _before = m.update_snapshot()["checked_at"]
+    m.get_update(refresh=1)
+    assert m.update_snapshot()["checked_at"] == _before, "a fresh answer is not re-checked"
+    m._update_set(checked_at=time.time() - (m.REFRESH_PERIOD + 5), available=False, latest="")
+    _answer = m.get_update(refresh=1)
+    assert _answer["available"] is True, "opening the page must refresh a stale answer"
+finally:
+    m.requests.get = _original_get
+    m._update_set(checked_at=0, available=False, latest="", error=None)
+
+assert m.UPDATE_BOOT_BURST and all(0 < gap < m.UPDATE_INTERVAL for gap in m.UPDATE_BOOT_BURST), (
+    "the first passes after boot must be sooner than the normal interval")
+assert "notify_update(state)" in _mainsrc, "the watch must notify, not just record"
+assert "setInterval(pollUpdate" in _ui_src, "the page has to keep asking"
+assert "api/update?refresh=1" in _ui_src, "and ask for a fresh answer when it opens"
+print("update delivery ok: found, notified once via tray, refreshed on page open")
+
 # --- pause: the lights stop being told anything ----------------------------
 assert 'id="pause"' in _ui_src, "the settings page needs a pause control"
 assert "async function togglePause" in _ui_src and "togglePause;" in _ui_src, (

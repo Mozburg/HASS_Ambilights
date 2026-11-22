@@ -8,6 +8,28 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.15.2] — 2026-11-22
+
+### Fixed
+- **An available update could go unannounced for up to six hours.** The check ran eight
+  seconds after start-up and then only every `UPDATE_INTERVAL_HOURS` (6 h default), so a
+  release published in between stayed invisible, and the only surface was a banner in the
+  settings page — which is not open when the app runs in the tray. Extra checks now run two
+  minutes and fifteen minutes after the first pass, opening the settings page refreshes an
+  answer older than five minutes (`GET /api/update?refresh=1`), a found update raises one tray
+  notification per version and sets the tray tooltip, the page shows a toast, a banner and a
+  footer marker, and the log records `update available: <version> (this is <current>,
+  UPDATE_MODE=<mode>)`.
+
+### Added
+- `GET /api/update?refresh=1` re-asks GitHub when the last answer is more than five minutes
+  old; without the parameter it returns the cached state.
+
+### Upgrading
+- Nothing to do. If you are on 2.15.0 or 2.15.1 and were never told about a release, this is
+  the version that fixes it: install it once from the releases page, and later releases will
+  announce themselves.
+
 ## [2.15.1] — 2026-11-22
 
 ### Added

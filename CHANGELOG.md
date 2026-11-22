@@ -8,23 +8,30 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
-## [2.14.1] — 2026-11-12
+## [2.15.1] — 2026-11-22
 
 ### Added
-- **Diagnostics, so a misbehaving light can be explained instead of guessed at.**
-  `GET /api/diagnostics` returns one JSON report: per light the sends in the last ten seconds,
-  the send rate, median gap between sends, how many times the colour mode changed, and an
-  **estimated noise level** (mean frame-to-frame change of the measurement, in 0/255 counts —
-  the number that separates "the picture is busy" from "the program is churning"); the last 120
-  send decisions with the reason each frame was or was not sent; the current settings (never a
-  secret); the counters from `/health`; and the tail of the log file. The settings page has a
-  **Diagnostics** button that copies it.
-- A **five-second summary line** in the log per light (`N send(s)/5s, noise X counts, modes …`),
-  so the log file alone shows whether a still scene is being churned.
-- The log file is now written for a plain script run as well, beside the config
-  (`ambilights.log`, rotating at 1 MB with three backups), not only by the packaged app.
+- **Pause lights.** A button in the settings header stops the program sending anything to
+  Home Assistant; the screen keeps being measured, so the preview and the panel stay live.
+  Resuming clears each light's dedupe state, so the next frame is sent instead of being
+  suppressed as unchanged. The state is also `GET/POST /api/pause` (`{"paused": true}`),
+  appears in `GET /health`, and reads "paused" in the connection label.
+- **Diagnostics.** `GET /api/diagnostics` returns one report: per light the sends in the last
+  ten seconds, the send rate, the median gap, colour-mode changes and an estimated noise level
+  (the mean frame-to-frame change of the measurement, in 0/255 counts); the last 120 send
+  decisions with the reason for each; the settings without secrets; the health counters; and
+  the tail of the log file. The settings page has a **Diagnostics** button that copies it.
+- The log gains a five-second summary per light — `N send(s)/5s, noise X counts, modes …` —
+  and is now written beside the config for a plain script run too, not only by the packaged
+  app (`ambilights.log`, rotating at 1 MB with three backups).
 
-## [2.14.0] — 2026-11-12
+### Fixed
+- `__version__` had been set to `2.14.1` after `2.15.0` was released; the version line is
+  now `2.15.1`.
+- The README carried a duplicated calibration section and the changelog two `2.14.0`
+  sections, both left by earlier edits.
+
+## [2.15.0] — 2026-11-19
 
 ### Added
 - **A Windows installer**, and the app builds its own: `packaging/hass-ambilights.iss` is

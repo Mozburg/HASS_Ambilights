@@ -8,7 +8,23 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
-## [2.15.0] — 2026-11-19
+## [2.14.1] — 2026-11-12
+
+### Added
+- **Diagnostics, so a misbehaving light can be explained instead of guessed at.**
+  `GET /api/diagnostics` returns one JSON report: per light the sends in the last ten seconds,
+  the send rate, median gap between sends, how many times the colour mode changed, and an
+  **estimated noise level** (mean frame-to-frame change of the measurement, in 0/255 counts —
+  the number that separates "the picture is busy" from "the program is churning"); the last 120
+  send decisions with the reason each frame was or was not sent; the current settings (never a
+  secret); the counters from `/health`; and the tail of the log file. The settings page has a
+  **Diagnostics** button that copies it.
+- A **five-second summary line** in the log per light (`N send(s)/5s, noise X counts, modes …`),
+  so the log file alone shows whether a still scene is being churned.
+- The log file is now written for a plain script run as well, beside the config
+  (`ambilights.log`, rotating at 1 MB with three backups), not only by the packaged app.
+
+## [2.14.0] — 2026-11-12
 
 ### Added
 - **A Windows installer**, and the app builds its own: `packaging/hass-ambilights.iss` is

@@ -50,6 +50,7 @@ Endpoints: GET /  GET /api/config  GET /health  GET /regions  GET /raw_grid
 
 
 import argparse
+import collections
 import json
 import logging
 import logging.handlers
@@ -192,7 +193,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.15.0"
+__version__ = "2.14.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -421,7 +422,7 @@ class Target:
 
     __slots__ = ("entity_id", "zones", "last_attempted", "last_sent",
                  "last_success_mono", "last_attempt_mono", "posts", "busy", "errors",
-                 "zone_label", "last_mode")
+                 "zone_label", "last_mode", "noise", "prev_rgb", "sends_at")
 
     def __init__(self, entity_id: str, zones: frozenset[int]):
         self.entity_id = entity_id
@@ -433,6 +434,9 @@ class Target:
         self.last_attempt_mono = 0.0
         self.posts = 0
         self.busy = 0
+        self.noise = 0.0                 # mean frame-to-frame change, in 0-255 counts
+        self.prev_rgb = None
+        self.sends_at = []               # recent send timestamps, for the rate
         self.errors = 0
         self.zone_label = ",".join(str(z) for z in sorted(zones))
 
@@ -544,7 +548,10 @@ def log_file_path() -> Path | None:
     if explicit:
         return Path(explicit)
     if not FROZEN:
-        return None
+        # Beside the config, so a plain `python hass_ambilights.py` produces a log too - it is
+        # the first thing anyone asks for when the lights misbehave.
+        base = CONFIG_PATH.parent if "CONFIG_PATH" in globals() else Path.cwd()
+        return base / "ambilights.log"
     if os.name == "nt":
         base = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData/Local")
     else:
@@ -710,6 +717,8 @@ UI_HTML = r"""<!DOCTYPE html>
       <button class="btn primary" id="save" type="button">Save &amp; apply</button>
       <button class="btn" id="revert" type="button">Revert</button>
       <button class="btn danger" id="reset" type="button">Reset to defaults</button>
+      <button class="btn" id="diagnostics" type="button"
+        title="Copy a report of send rates, noise and recent decisions - what to send when the lights misbehave">Diagnostics</button>
       <a class="btn" href="/welcome">Setup wizard</a>
       <small class="mono" id="version"></small>
       <small class="mono" id="cfgpath"></small>
@@ -769,6 +778,8 @@ function setDirty(v, live) {
   refreshVisibility();
   $("dirtybadge").hidden = !v;
   $("save").disabled = !v;
+  const diag = $("diagnostics");
+  if (diag) diag.onclick = copyDiagnostics;
   $("revert").disabled = !v;
 }
 
@@ -1056,6 +1067,24 @@ function control(meta, value) {
   text.oninput = () => { CFG[meta.name] = text.value; setDirty(true, true); };
   wrap.appendChild(text);
   return wrap;
+}
+
+async function copyDiagnostics() {
+  try {
+    const report = await fetch("/api/diagnostics").then((r) => r.json());
+    const text = JSON.stringify(report, null, 1);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Diagnostics copied - paste them where the problem is being looked at");
+    } catch (_) {
+      // clipboard blocked (some webviews): show it instead of losing it
+      const w = window.open("", "_blank");
+      if (w) { w.document.write(`<pre>${esc(text)}</pre>`); w.document.close(); }
+      else toast("Open /api/diagnostics in a browser", true);
+    }
+  } catch (err) {
+    toast("Could not collect diagnostics: " + err, true);
+  }
 }
 
 function calibrationResults() {
@@ -3149,6 +3178,52 @@ def brightness_for_colour(colour: dict) -> int:
     return int(round(max(1.0, min(255.0, level))))
 
 
+# Every send decision, newest last: enough to see a pattern, small enough to paste.
+SEND_LOG: "collections.deque" = collections.deque(maxlen=300)
+
+
+def note_decision(target: Target, colour: dict, brightness: int, sent: bool,
+                  reason: str, now: float) -> None:
+    """Record what happened to this frame for this light, and keep the noise estimate."""
+    rgb = list(colour.get("rgb") or (0, 0, 0))
+    if target.prev_rgb is not None:
+        step = sum(abs(a - b) for a, b in zip(rgb, target.prev_rgb)) / 3.0
+        target.noise += 0.02 * (step - target.noise)      # slow average
+    target.prev_rgb = rgb
+    if sent:
+        target.sends_at.append(now)
+        del target.sends_at[:-40]
+    last = target.last_attempted
+    SEND_LOG.append({
+        "t": round(now, 2), "light": target.entity_id, "sent": sent, "why": reason,
+        "mode": colour.get("white_mode"), "rgb": rgb,
+        "xy": colour.get("xy"), "brightness": brightness,
+        "kelvin": int(round(float(colour["kelvin"]))) if colour.get("kelvin") else None,
+        "d_e": round(delta_e(rgb, list(last[0])), 2) if last else None,
+        "noise": round(target.noise, 2),
+    })
+
+
+def send_reason(target: Target, colour: dict, brightness: int) -> str | None:
+    """Why this frame would be sent, or None if it would not."""
+    last = target.last_attempted
+    if last is None:
+        return "first"
+    wanted_mode = colour.get("white_mode")
+    if wanted_mode and target.last_mode and wanted_mode != target.last_mode:
+        return "mode"
+    d_e = delta_e(colour["rgb"], last[0])
+    if d_e >= MIN_DELTA_E:
+        return f"colour ({d_e:.1f})"
+    if last[1] is not None and abs(brightness - last[1]) >= MIN_BRIGHTNESS_DELTA:
+        return f"brightness ({abs(brightness - last[1])})"
+    if target.last_sent == last:
+        return None
+    if time.perf_counter() - target.last_attempt_mono >= RESEND_AFTER:
+        return "resend"
+    return None
+
+
 def should_send(target: Target, colour: dict, brightness: int) -> bool:
     """Decide from the screen, never from a retry queue."""
     last = target.last_attempted
@@ -4119,8 +4194,21 @@ def capture_loop() -> None:
     identical = 0
     last_eval = 0.0
     seen_epoch = MONITOR_EPOCH
+    next_summary = time.perf_counter() + 5.0
 
     while not stop_event.is_set():
+        if time.perf_counter() >= next_summary:
+            next_summary += 5.0
+            _now = time.perf_counter()
+            for _target in TARGETS:
+                _recent = [t for t in _target.sends_at if _now - t <= 5.0]
+                _modes = sorted({e["mode"] for e in SEND_LOG
+                                 if e["light"] == _target.entity_id
+                                 and _now - e["t"] <= 5.0 and e["mode"]})
+                if _recent or _target.noise > 0.5:
+                    log.info("diagnostics %s: %d send(s)/5s, noise %.1f counts, modes %s",
+                             _target.entity_id, len(_recent), _target.noise,
+                             ",".join(_modes) or "none")
         if MONITOR_EPOCH != seen_epoch:
             # MONITOR_INDEX changed in the UI: re-resolve instead of restarting the
             # program (a restart dropped the port and the config for anyone who did not
@@ -4226,6 +4314,9 @@ def capture_loop() -> None:
                 colour["preview"] = preview_colour(colour)
                 light_report[target.entity_id] = colour
                 brightness = brightness_for_colour(colour)
+                reason = None if tuning else send_reason(target, colour, brightness)
+                note_decision(target, colour, brightness, bool(reason),
+                              reason or ("calibrating" if tuning else "unchanged"), measured_at)
                 if not tuning and should_send(target, colour, brightness):
                     batch[target.entity_id] = colour
                     # record it now: the sender may not post for a few ms, and
@@ -5131,6 +5222,61 @@ def get_regions():
     with state_lock:
         return {"zones": latest_data["regions"].get("zones", []),
                 "full": latest_data["regions"].get("full")}
+
+
+def _log_tail(lines: int = 150) -> list[str]:
+    path = log_file_path()
+    if path is None or not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return text[-lines:]
+
+
+def _recent_rate(target: Target, now: float, window: float = 10.0) -> dict:
+    recent = [t for t in target.sends_at if now - t <= window]
+    gaps = [round(b - a, 3) for a, b in zip(recent, recent[1:])]
+    modes = [e["mode"] for e in SEND_LOG
+             if e["light"] == target.entity_id and now - e["t"] <= window]
+    changes = sum(1 for a, b in zip(modes, modes[1:]) if a != b)
+    last = target.last_attempted
+    sent_entries = [e for e in SEND_LOG
+                    if e["light"] == target.entity_id and e["sent"]]
+    latest = sent_entries[-1] if sent_entries else None
+    return {
+        "sends": len(recent),
+        "per_second": round(len(recent) / window, 2),
+        "median_gap_s": sorted(gaps)[len(gaps) // 2] if gaps else None,
+        "mode_changes": changes,
+        "noise_counts": round(target.noise, 2),
+        "last_payload": {
+            "mode": target.last_mode,
+            "kelvin": (latest.get("kelvin")
+                       if latest and latest.get("mode") == "color_temp" else None),
+            "rgb": list(last[0]) if last else None,
+            "brightness": last[1] if last else None,
+        },
+    }
+
+
+@app.get("/api/diagnostics")
+def api_diagnostics():
+    """Everything needed to explain flicker without guessing: rates, noise, decisions, log."""
+    now = time.perf_counter()
+    log_path = log_file_path()
+    return {
+        "ok": True,
+        "version": __version__,
+        "settings": {name: value for name, value in settings_snapshot().items()
+                     if SETTINGS_BY_NAME.get(name, {}).get("type") != "secret"},
+        "stats": dict(stats),
+        "lights": {t.entity_id: _recent_rate(t, now) for t in TARGETS},
+        "decisions": list(SEND_LOG)[-120:],
+        "log_file": str(log_path) if log_path else None,
+        "log_tail": _log_tail(),
+    }
 
 
 @app.get("/health")

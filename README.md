@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.15.0** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.14.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -254,69 +254,6 @@ three measured points say more than one exponent, and the defaults are already a
 response.
 
 `SATURATION_BOOST` and `BRIGHTNESS_FROM` sit under **Advanced** in the same card. `--calibrate` on the command line still runs the old twelve-colour accuracy sweep.
-
-## White frames use the bulb's own white
-
-Most bulbs have a dedicated warm/cool LED pair for white, and a separate RGB set for
-colour. Asking for *white* in `xy` often engages the RGB mixing, which is dimmer and less
-accurate than the white channel the bulb was built around. So neutral frames are sent as
-`color_temp_kelvin` instead, and coloured frames stay on `xy`:
-
-- **Neutral** means within duv 0.006 of the Planckian locus — a green or pink tint is not
-  a colour temperature and stays on `xy`. Warm whites (2700 K) qualify just as much as
-  daylight ones: distance from D65 is *not* the test, tint is.
-- The kelvin is clamped to the bulb's own `min/max_color_temp_kelvin`; out of range means
-  `xy`, which can render the extremes a colour temperature cannot.
-- **Hysteresis**: three consecutive neutral frames and 0.5 s before switching to kelvin;
-  a clearly coloured frame leaves it immediately. Otherwise a pale scene toggles the radio
-  between two colour modes every frame.
-- The calibration **warmth** slider applies here, as a kelvin shift — and *only* here. It
-  never tints a coloured frame, which is what you want: white is corrected on the white
-  channel, colour is corrected in xy.
-- `WHITE_MODE` (Advanced → Sending) is `auto` (default), `color_temp` (neutral frames
-  only) or `xy` (never, the old behaviour).
-
-`GET /api/lights` reports `white_channel` per light, and `/health` counts `cct_posts` so
-you can see the split for yourself. Nothing here assumes a particular bulb: if a light
-reports `color_temp` and its kelvin bounds, it gets the kelvin path; if it reports neither,
-it stays on `xy`, which every light supports.
-
-## Calibrating to your own eyes
-
-The **Calibration** card does the job the old automatic check could not. That check
-compared the colour a light *reports* to the colour it was sent — useful for catching a
-bulb that lies, blind to a lampshade, a wall, or a warm-white LED. This one uses you as
-the sensor.
-
-Press **Calibrate…**, pick a light, and the app switches the others off, puts an exact
-reference patch on screen and sets that light to the same colour. Drag **hue**,
-**saturation** and **brightness** until the two match, then **Looks right**:
-
-The session **walks every mapped light**, one at a time: press **Calibrate…**, work through
-the steps for the first lamp, and the panel moves to the next and says `light 2 of 3`. Each
-light keeps its own offsets. The quick pass covers every light once, then the refinement
-pass does the same circuit.
-
-| | |
-|---|---|
-| white | brightness and **warmth** (− cool, + warm): a saturation slider cannot move a neutral, because it sits exactly on D65 |
-| quick pass | white + red/green/blue, one level each — **4 frames**, about a minute |
-| refined | carries straight on with dark and light for each colour — **10 frames** |
-| full | adds dark and light for white too, so the level curve gets three points — **12 frames** |
-
-White only offers brightness and warm/cool: it is the frame that sets the level, and no
-hue control can fix a colour temperature. Whatever you accept is stored per light in
-`calibration.json` beside `config.json`, listed in the card with a **Clear** button, and
-applied to every frame that light is sent from then on.
-
-Two things will quietly ruin a calibration, so the panel says both: turn off Windows
-**Night Light** and **HDR** first (they tint the reference patch), and calibrate in the
-light you actually watch in. A calibration corrects a bulb that leans cyan or orange; it
-cannot correct a lampshade.
-
-`BRIGHTNESS_FROM` and `SATURATION_BOOST` sit under **Advanced** in the same card — they are the
-numeric half of the same job. `--calibrate` on the command line
-still runs the old twelve-colour accuracy sweep.
 
 ## The colour knobs
 

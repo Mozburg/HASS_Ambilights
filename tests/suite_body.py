@@ -1644,6 +1644,33 @@ finally:
     (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
     m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
 
+# --- diagnostics: what was sent, and why ----------------------------------
+_dtarget = m.Target("light.diag", frozenset({1}))
+_dtarget.noise = 0.0
+_dcolour = {"rgb": [200, 120, 90], "xy": [0.4, 0.36], "white_mode": "xy",
+            "brightness": 120, "kelvin": None}
+_dtarget.prev_rgb = [200, 120, 90]
+_dtarget.last_attempted = ([195, 118, 88], 118)   # so a delta can be computed
+before = len(m.SEND_LOG)
+m.note_decision(_dtarget, _dcolour, 120, True, "colour (4.2)", 100.0)
+m.note_decision(_dtarget, _dcolour, 120, False, "unchanged", 100.03)
+assert len(m.SEND_LOG) >= min(before + 2, 300), "every decision must be recorded"
+assert list(m.SEND_LOG)[-2]["why"] == "colour (4.2)", "the send reason must be kept"
+_last = list(m.SEND_LOG)[-1]
+assert _last["sent"] is False and _last["why"] == "unchanged", _last
+assert _last["noise"] is not None and _last["d_e"] is not None, _last
+_rate = m._recent_rate(_dtarget, 100.0, window=10.0)
+assert _rate["sends"] == 1 and _rate["per_second"] > 0, _rate
+assert _rate["noise_counts"] >= 0, _rate
+_report = m.api_diagnostics()
+for key in ("version", "settings", "stats", "lights", "decisions", "log_tail", "log_file"):
+    assert key in _report, f"diagnostics is missing {key}"
+assert _report["version"] == m.__version__, _report["version"]
+assert "HA_TOKEN" not in _report["settings"], "diagnostics must never carry a secret"
+assert isinstance(_report["log_tail"], list)
+print(f"diagnostics ok: {len(_report['decisions'])} decisions, "
+      f"noise {_rate['noise_counts']}, log tail {len(_report['log_tail'])} lines")
+
 # --- a save must not touch an undeclared name ------------------------------
 _ui = m.UI_HTML
 # this shipped broken in 2.9.3/2.9.4: save() used `visible`, which only existed
@@ -1669,7 +1696,9 @@ print("save ok: the server persists the UI's payload and clears the unsaved flag
 _keep_frozen = m.FROZEN
 m.FROZEN = False
 assert m.app_data_dir() == __import__("pathlib").Path(m.__file__).resolve().parent
-assert m.log_file_path() is None, "a script run has a terminal to log to"
+_lpath = m.log_file_path()
+assert _lpath is not None and str(_lpath).endswith("ambilights.log"), (
+    f"a script run must still produce a log to send: {_lpath}")
 _cmd = m.autostart_command()
 assert "--tray" in _cmd and "hass_ambilights.py" in _cmd, _cmd
 m.FROZEN = True

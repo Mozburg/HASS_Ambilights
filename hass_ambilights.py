@@ -193,7 +193,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.14.1"
+__version__ = "2.15.1"
 
 
 # ---------------------------------------------------------------- config ----
@@ -714,6 +714,8 @@ UI_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="actions">
+      <button class="btn" id="pause" type="button"
+        title="Stop sending colours to the lights; the screen is still measured">Pause lights</button>
       <button class="btn primary" id="save" type="button">Save &amp; apply</button>
       <button class="btn" id="revert" type="button">Revert</button>
       <button class="btn danger" id="reset" type="button">Reset to defaults</button>
@@ -780,6 +782,8 @@ function setDirty(v, live) {
   $("save").disabled = !v;
   const diag = $("diagnostics");
   if (diag) diag.onclick = copyDiagnostics;
+  const pause = $("pause");
+  if (pause) pause.onclick = togglePause;
   $("revert").disabled = !v;
 }
 
@@ -1067,6 +1071,41 @@ function control(meta, value) {
   text.oninput = () => { CFG[meta.name] = text.value; setDirty(true, true); };
   wrap.appendChild(text);
   return wrap;
+}
+
+let lightsPaused = false;
+
+function paintPause() {
+  const btn = $("pause");
+  if (!btn) return;
+  btn.textContent = lightsPaused ? "Resume lights" : "Pause lights";
+  btn.className = lightsPaused ? "btn danger" : "btn";
+  btn.title = lightsPaused
+    ? "The lights are not being updated - press to resume"
+    : "Stop sending colours to the lights; the screen is still measured";
+  document.body.classList.toggle("paused", lightsPaused);
+}
+
+async function togglePause() {
+  const btn = $("pause");
+  if (btn) btn.disabled = true;
+  try {
+    const response = await fetch("/api/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused: !lightsPaused }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || ("HTTP " + response.status));
+    lightsPaused = !!result.paused;
+    paintPause();
+    toast(lightsPaused ? "Lights paused - they stay as they are until you resume"
+                       : "Lights resumed");
+  } catch (err) {
+    toast("Could not change the pause state: " + err, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function copyDiagnostics() {
@@ -1883,7 +1922,11 @@ async function tick() {
   try {
     const h = await fetch("/health").then((r) => r.json());
     $("dot").className = "dot on";
-    $("conn").textContent = "connected";
+    $("conn").textContent = h.paused ? "paused" : "connected";
+    if (typeof h.paused === "boolean" && h.paused !== lightsPaused) {
+      lightsPaused = h.paused;
+      paintPause();
+    }
     const s = h.stats || {};
     if (lastPosts !== null && lastPostT !== null && s.posts >= lastPosts) {
       const dt = (performance.now() - lastPostT) / 1000;
@@ -4317,7 +4360,9 @@ def capture_loop() -> None:
                 reason = None if tuning else send_reason(target, colour, brightness)
                 note_decision(target, colour, brightness, bool(reason),
                               reason or ("calibrating" if tuning else "unchanged"), measured_at)
-                if not tuning and should_send(target, colour, brightness):
+                if PAUSED:
+                    pass                          # measured, shown, not sent
+                elif not tuning and should_send(target, colour, brightness):
                     batch[target.entity_id] = colour
                     # record it now: the sender may not post for a few ms, and
                     # dedupe has to hold for that window too
@@ -5261,6 +5306,39 @@ def _recent_rate(target: Target, now: float, window: float = 10.0) -> dict:
     }
 
 
+@app.get("/api/pause")
+def get_pause():
+    return {"ok": True, "paused": PAUSED,
+            "since": PAUSED_SINCE,
+            "seconds": (round(time.time() - PAUSED_SINCE, 1)
+                        if PAUSED and PAUSED_SINCE else 0.0)}
+
+
+@app.post("/api/pause")
+def post_pause(payload: Any = Body(...)):
+    global PAUSED, PAUSED_SINCE
+    if not isinstance(payload, dict) or "paused" not in payload:
+        return JSONResponse({"ok": False, "error": "send {\"paused\": true|false}"},
+                            status_code=400)
+    wanted = payload["paused"]
+    if not isinstance(wanted, bool):
+        return JSONResponse({"ok": False, "error": "paused must be true or false"},
+                            status_code=400)
+    if wanted == PAUSED:
+        return {"ok": True, "paused": PAUSED, "changed": False}
+    PAUSED = wanted
+    PAUSED_SINCE = time.time() if wanted else None
+    if not wanted:
+        # forget what each light was last told, so the next frame is sent rather than
+        # suppressed as unchanged - resuming must not leave the lamps on a stale colour
+        for target in TARGETS:
+            target.last_attempted = None
+            target.last_sent = None
+            target.last_mode = None
+    log.info("lights %s via the API", "paused" if wanted else "resumed")
+    return {"ok": True, "paused": PAUSED, "changed": True}
+
+
 @app.get("/api/diagnostics")
 def api_diagnostics():
     """Everything needed to explain flicker without guessing: rates, noise, decisions, log."""
@@ -5274,6 +5352,7 @@ def api_diagnostics():
         "stats": dict(stats),
         "lights": {t.entity_id: _recent_rate(t, now) for t in TARGETS},
         "decisions": list(SEND_LOG)[-120:],
+        "paused": PAUSED,
         "log_file": str(log_path) if log_path else None,
         "log_tail": _log_tail(),
     }
@@ -5310,6 +5389,7 @@ def health():
             and time.time() - (stats.get("sender_beat") or 0) < 5),
         "restart_failed": RESTART_FAILED,
         "restarting": stats.get("restarting", False),
+        "paused": PAUSED,
         "has_frame": bool(len(latest_data["raw_grid"])) if latest_data["raw_grid"] is not None else False,
         "lights": [t.as_dict(latest_data["lights"].get(t.entity_id)) for t in TARGETS],
         "stats": dict(stats),
@@ -5504,6 +5584,10 @@ def save_calibration() -> bool:
 
 
 CALIBRATION_SESSION: dict = {}          # what to put back when the user finishes
+# Set from the UI (or POST /api/pause): the capture loop keeps measuring so the preview stays
+# live, but nothing is sent to Home Assistant while this is true.
+PAUSED = False
+PAUSED_SINCE: float | None = None
 
 
 def _frame_colour(frame: str, level: str = "white") -> list[int]:

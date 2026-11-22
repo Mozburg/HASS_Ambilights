@@ -1644,6 +1644,41 @@ finally:
     (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
     m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
 
+# --- pause: the lights stop being told anything ----------------------------
+assert 'id="pause"' in _ui_src, "the settings page needs a pause control"
+assert "async function togglePause" in _ui_src and "togglePause;" in _ui_src, (
+    "the pause button must be wired")
+_mainsrc = open(m.__file__, encoding="utf-8").read()
+assert "if PAUSED:" in _mainsrc and "measured, shown, not sent" in _mainsrc, (
+    "the capture loop's send point must honour PAUSED")
+
+m.PAUSED = False
+_first = m.post_pause({"paused": True})
+assert _first["paused"] is True and _first["changed"] is True, _first
+assert m.PAUSED is True, "pause must take effect immediately"
+assert m.get_pause()["paused"] is True
+assert m.post_pause({"paused": True})["changed"] is False, "pausing twice is not a change"
+assert m.health()["paused"] is True, "health must report the paused state"
+assert m.api_diagnostics()["paused"] is True, "diagnostics must report it too"
+
+# resuming must force a send: otherwise the dedupe would suppress the first frame back and
+# the lamps would sit on a stale colour until the picture changed
+_probe_target = m.Target("light.pause", frozenset({1}))
+_probe_target.last_attempted = ([10, 10, 10], 40)
+_probe_target.last_sent = _probe_target.last_attempted
+_probe_target.last_mode = "xy"
+m.TARGETS.append(_probe_target)
+_resume = m.post_pause({"paused": False})
+assert _resume["paused"] is False and _resume["changed"] is True, _resume
+assert _probe_target.last_attempted is None, "resume must forget what each light was told"
+m.TARGETS.remove(_probe_target)
+
+for _bad in ({}, {"paused": "yes"}, None):
+    _answer = m.post_pause(_bad)
+    assert getattr(_answer, "status_code", None) == 400, f"{_bad!r} must be refused: {_answer}"
+assert m.PAUSED is False, "a refused payload must not change the state"
+print("pause ok: button, endpoint, health, diagnostics, resume forces a send")
+
 # --- diagnostics: what was sent, and why ----------------------------------
 _dtarget = m.Target("light.diag", frozenset({1}))
 _dtarget.noise = 0.0

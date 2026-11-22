@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.14.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.15.1** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -281,6 +281,32 @@ room without also pulling the colour toward mean — that is what turning it off
 old config or a script: they are folded into the sliders on load (`mean` → 0, `dominant`
 → 1) and hidden from the page.
 
+## Pausing
+
+**Pause lights** in the settings header stops everything being sent to Home Assistant. The
+screen is still measured, so the preview and the panel keep updating and you can see what the
+program *would* send; nothing reaches the bulbs. **Resume lights** puts it back, and the first
+frame after resuming is always sent — resuming clears each light's dedupe state, so a lamp
+cannot be left on a stale colour because the picture had not changed.
+
+The same control is `POST /api/pause` with `{"paused": true}` or `{"paused": false}`;
+`GET /api/pause` reports the state and how long it has been paused, and `GET /health` carries
+`paused`.
+
+## Diagnostics
+
+`GET /api/diagnostics` — or the **Diagnostics** button on the settings page, which copies it —
+returns one report: per light the sends in the last ten seconds, the send rate, the median gap
+between sends, how many times the colour mode changed, and an estimated **noise level** (the
+mean frame-to-frame change of the measurement, in 0/255 counts). A small noise figure with a
+high send rate means a still picture is being churned; a large one means the picture really is
+moving and the lamp is following it. The report also carries the last 120 send decisions with
+the reason for each, the settings without secrets, the health counters, and the tail of the log.
+
+The log itself is `ambilights.log` beside your `config.json` (written by a script run as well
+as the packaged app, rotating at 1 MB with three backups), and every five seconds each light
+logs one line: `N send(s)/5s, noise X counts, modes …`.
+
 ## Credentials and exposure
 
 `HA_URL` and `HA_TOKEN` are ordinary settings: editable in the UI, and the token is the
@@ -311,10 +337,13 @@ the environment variable for that setting is ignored.
 | `GET /api/lights` | light entities from HA for the picker (30 s cache, `?refresh=1` to bypass) |
 | `GET /api/monitors` | monitors mss can capture, for the Monitor picker (0 = all combined) |
 | `POST /api/test-connection` | probe HA with the saved or just-typed URL + token |
-| `GET /api/calibration` | every light's stored hue/chroma/level offsets, plus the frames and levels the panel uses |
+| `GET /api/calibration` | every light's stored points (black/grey/white, white temperature, colour factors), plus both flows and their defaults |
 | `POST /api/calibration` | `start` (solo a light), `apply` (send one frame with live offsets), `commit`, `clear`, `end` (restore the others) |
 | `POST /api/calibrate` | run the accuracy check in the background (`409` if one is already running) |
-| `GET /health` | `version` plus live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state |
+| `GET /api/pause` | whether sending is paused, and for how long |
+| `POST /api/pause` | `{"paused": true}` stops sending to HA without stopping capture; `false` resumes and forces the next frame out |
+| `GET /api/diagnostics` | send rates, mode changes, per-light noise estimate, the last 120 send decisions, settings without secrets, and the log tail |
+| `GET /health` | `version` plus live stats: posts, frame age, cycle time, pace, busy/stalls/timeouts, per-light counters, calibration state, `paused` |
 | `GET /regions` | the nine zone colours for the current frame |
 | `GET /raw_grid` | the 64×36 sample grid |
 

@@ -32,9 +32,34 @@ jobs:
           python packaging/make_assets.py
           python packaging/make_splash.py
 
-      - name: Build one-file exe
+      - name: Build one-folder exe (what the installer ships)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # DLLs beside the exe: nothing is unpacked to %TEMP% at start-up, which is where an
+          # antivirus or a locked-down temp folder produced "Failed to load Python DLL".
+          python -m PyInstaller --noconfirm --clean --onedir --windowed `
+            --name HassAmbilights `
+            --icon packaging/icon.ico `
+            --version-file packaging/version_info.txt `
+            --collect-submodules uvicorn `
+            --collect-submodules pystray `
+            --collect-submodules webview `
+            --hidden-import pystray._win32 `
+            --exclude-module matplotlib `
+            hass_ambilights.py
+          if (-not (Test-Path "dist\HassAmbilights\HassAmbilights.exe")) {
+            throw "the folder build produced no exe"
+          }
+          $dll = Get-ChildItem "dist\HassAmbilights" -Recurse -Filter "python3*.dll" |
+            Select-Object -First 1
+          if (-not $dll) { throw "the folder build has no python runtime beside the exe" }
+          Write-Host "folder build runtime: $($dll.FullName)"
+
+      - name: Build one-file exe (portable)
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --distpath dist-portable --workpath build-portable `
             --name HassAmbilights `
             --icon packaging/icon.ico `
             --splash packaging/splash.png `
@@ -45,6 +70,13 @@ jobs:
             --hidden-import pystray._win32 `
             --exclude-module matplotlib `
             hass_ambilights.py
+
+      - name: Collect the portable exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path "dist-portable\HassAmbilights.exe")) { throw "no portable exe" }
+          Copy-Item "dist-portable\HassAmbilights.exe" "dist\HassAmbilights.exe" -Force
 
       - name: Smoke test (server mode, no display needed)
         shell: pwsh
@@ -229,6 +261,16 @@ jobs:
             if (Get-Process HassAmbilights -ErrorAction SilentlyContinue) {
               Emit-Failure "the silent install started the app - [Run] must stay skipifsilent"
               throw "the silent install started the app"
+            }
+
+            # the installed app must carry its runtime: a one-file payload here extracts
+            # python312.dll to %TEMP% on every start, and any interference with that is the
+            # "Failed to load Python DLL" the user cannot act on
+            $runtime = Get-ChildItem $installed -Recurse -Filter "python3*.dll" |
+              Select-Object -First 1
+            if (-not $runtime) {
+              Emit-Failure "the installed app has no python runtime beside it - the installer shipped the one-file build"
+              throw "installed app has no bundled runtime"
             }
 
             # the installed copy is a working app (env vars, not -Environment: this has

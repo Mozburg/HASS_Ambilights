@@ -21,8 +21,28 @@ Invoke-Step { python -m pip install -r requirements.txt -r requirements-gui.txt 
 Invoke-Step { python packaging/make_assets.py } "icon and version resource"
 Invoke-Step { python packaging/make_splash.py } "splash image"
 
-Invoke-Step { python -m PyInstaller --noconfirm --clean --onefile --windowed `
+# One folder: this is what the installer ships. The DLLs sit beside the exe, so nothing is
+# unpacked to %TEMP% at start-up (that extraction is what antivirus interferes with, producing
+# "Failed to load Python DLL python312.dll").
+Invoke-Step { python -m PyInstaller --noconfirm --clean --onedir --windowed `
   --name HassAmbilights `
+  --icon packaging/icon.ico `
+  --version-file packaging/version_info.txt `
+  --collect-submodules uvicorn `
+  --collect-submodules pystray `
+  --collect-submodules webview `
+  --hidden-import pystray._win32 `
+  --exclude-module matplotlib `
+  hass_ambilights.py } "PyInstaller (one folder)"
+
+if (-not (Test-Path "dist/HassAmbilights/HassAmbilights.exe")) {
+    throw "dist/HassAmbilights/HassAmbilights.exe was not produced"
+}
+
+# One file: the portable download. Still built, because a single file is genuinely convenient,
+# and it is what people who dislike installers run.
+Invoke-Step { python -m PyInstaller --noconfirm --onefile --windowed `
+  --distpath dist-portable --workpath build-portable `
   --icon packaging/icon.ico `
   --splash packaging/splash.png `
   --version-file packaging/version_info.txt `
@@ -33,7 +53,11 @@ Invoke-Step { python -m PyInstaller --noconfirm --clean --onefile --windowed `
   --exclude-module matplotlib `
   hass_ambilights.py } "PyInstaller"
 
-if (-not (Test-Path "dist/HassAmbilights.exe")) { throw "dist/HassAmbilights.exe was not produced" }
+if (-not (Test-Path "dist-portable/HassAmbilights.exe")) {
+    throw "dist-portable/HassAmbilights.exe was not produced"
+}
+Copy-Item "dist-portable/HassAmbilights.exe" "dist/HassAmbilights.exe" -Force
+# The one-file build writes its own work dir; the folder build must not be picked up as one.
 
 $version = (python packaging/make_assets.py --version).Trim()
 if (-not $version) { throw "could not read __version__ from hass_ambilights.py" }
@@ -56,7 +80,8 @@ $sums | Set-Content -Encoding ascii "dist/SHA256SUMS.txt"
 
 Write-Host ""
 Write-Host "Built:" -ForegroundColor Green
-Write-Host "  dist\HassAmbilights.exe"
+Write-Host "  dist\HassAmbilights\HassAmbilights.exe  (installed app, one folder)"
+Write-Host "  dist\HassAmbilights.exe            (portable, one file)"
 Write-Host "  $setup"
 Write-Host "  dist\SHA256SUMS.txt"
 Write-Host "Unsigned, so Windows SmartScreen will warn on first run."

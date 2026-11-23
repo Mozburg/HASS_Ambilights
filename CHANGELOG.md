@@ -8,6 +8,24 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.15.4] — 2026-11-23
+
+### Fixed
+- **"Failed to load Python DLL ... python312.dll" from the installed app.** The installer
+  shipped the one-file build, which unpacks its runtime to `%TEMP%\_MEIxxxxxx` on every start;
+  where that extraction is blocked or quarantined — antivirus, an endpoint agent, Controlled
+  Folder Access, a full or non-writable temp folder — Python never starts, and the failure
+  happens in the bootloader, so the program cannot report it. The installer now ships a
+  **one-folder** build, with the runtime in `_internal` beside the exe and nothing extracted at
+  start-up. The single-file exe remains the portable download.
+- The Windows CI job builds both layouts, asserts the folder build carries a `python3*.dll`,
+  and fails the build if the *installed* app has no runtime beside it — the exact shape of this
+  bug.
+
+### Upgrading
+- Install 2.15.4 from the releases page. If you already have 2.15.3's installer, you can also
+  run the portable exe, but the installed app is the reliable one.
+
 ## [2.15.3] — 2026-11-22
 
 ### Fixed

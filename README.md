@@ -1,6 +1,6 @@
 # HASS Ambilights
 
-**Version 2.15.3** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
+**Version 2.15.4** · [changelog](CHANGELOG.md) · [semantic versioning](https://semver.org)
 
 Mirror what's on your screen onto Home Assistant lights — Ambilight style — with a
 web UI for every knob, and a colour pipeline that actually matches the panel.
@@ -280,6 +280,25 @@ room without also pulling the colour toward mean — that is what turning it off
 `COLOR_ALGO`, `DOMINANT_MIX` and `DOMINANT_LUMINANCE` still work if you have them in an
 old config or a script: they are folded into the sliders on load (`mean` → 0, `dominant`
 → 1) and hidden from the page.
+
+## "Failed to load Python DLL"
+
+The **portable** single-file exe unpacks its runtime (`python312.dll` and friends) to
+`%TEMP%\_MEIxxxxxx` on every start. If something interferes with that — antivirus quarantine,
+an over-zealous endpoint agent, Controlled Folder Access, a full or non-writable temp folder —
+Python never starts and Windows reports:
+
+```
+Failed to load Python DLL ... python312.dll
+LoadLibrary: The specified module could not be found.
+```
+
+The program cannot catch this: it happens in the bootloader, before any of its code runs.
+
+The **installed** app does not do this. Since 2.15.4 the installer ships a one-folder build, so
+the runtime sits next to the exe in `%LOCALAPPDATA%\Programs\HASS Ambilights\_internal\` and
+nothing is extracted. If you see this error, install with the setup exe rather than running the
+portable exe; if you need the portable one, add an exclusion for `%TEMP%` in your antivirus.
 
 ## Update notifications
 

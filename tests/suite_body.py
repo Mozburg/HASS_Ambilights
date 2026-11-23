@@ -2464,9 +2464,17 @@ for piece in ("OutputBaseFilename=HassAmbilights-Setup-{#AppVersion}",
               "PrivilegesRequired=lowest", "DefaultDirName={localappdata}",
               "CloseApplications=yes",
               "ArchitecturesAllowed=x64compatible",   # needs Inno 6.3+
-              'Source: "..\\dist\\{#AppExe}"'):
+              'Source: "..\\dist\\HassAmbilights\\*"'):
     assert piece in _script, "the installer lost: " + piece
 assert "desktopicon" in _script and "[UninstallRun]" in _script
+assert "dist\\HassAmbilights\\*" in _script, (
+    "the installer must ship the folder build: a one-file payload unpacks python312.dll to "
+    "%TEMP% and fails as 'Failed to load Python DLL' wherever that is blocked")
+_workflow = (_root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8")
+assert "--onedir" in _workflow, "the workflow must build the folder layout the installer ships"
+assert "has no python runtime beside" in _workflow or "no python runtime beside it" in _workflow, (
+    "the install check must assert the installed app carries its runtime")
+assert "dist-portable" in _workflow, "the portable exe is built separately so the two cannot mix"
 # The app is restarted by the installer, not by a shell command from the app: the interactive
 # entry keeps its postinstall prompt, and a separate entry covers the silent (update) case.
 _run = _script.split("[Run]", 1)[1].split("[", 1)[0]

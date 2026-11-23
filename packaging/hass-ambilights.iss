@@ -78,7 +78,19 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
+; Interactive install: offer to start it, as before.
 Filename: "{app}\{#AppExe}"; Description: "Start {#AppName}"; Flags: nowait postinstall skipifsilent
+; Started by the app's own update button, which passes /UPDATED=1: the installer brings the app
+; back after the files are replaced. The app no longer chains a `start` command after the
+; installer - cmd mangled that quoting and Windows reported "cannot find '\'".
+Filename: "{app}\{#AppExe}"; Flags: nowait runhidden; Check: UpdateRequested
+
+[Code]
+function UpdateRequested(): Boolean;
+begin
+  { Explicit, so a silent install run by hand or by CI does not launch the app behind it. }
+  Result := ExpandConstant('{param:UPDATED|0}') = '1';
+end;
 
 [UninstallRun]
 ; Close the running app before the uninstaller deletes the exe.

@@ -193,7 +193,7 @@ from PIL import Image
 #   MINOR - a new capability, backwards compatible
 #   PATCH - a bug fix
 # Bump this before tagging a release; CI checks the format and the CHANGELOG.
-__version__ = "2.15.2"
+__version__ = "2.15.3"
 
 
 # ---------------------------------------------------------------- config ----
@@ -5135,12 +5135,32 @@ def download_update(directory: Path | None = None) -> tuple[Path | None, str]:
     return target, ""
 
 
+def plausible_installer(path: Path | None) -> bool:
+    """A file we are willing to hand to Windows.
+
+    Guards the shell against a blank or truncated name: launching "" or "\\" is how the
+    "Windows cannot find '\\'" dialog appears instead of an error we can report.
+    """
+    if path is None:
+        return False
+    text = str(path).strip()
+    if len(text) < 5 or text.rstrip("\\/") in ("", "C:"):
+        return False
+    if not text.lower().endswith(".exe"):
+        return False
+    return path.is_file()
+
+
 def installer_command(path: Path) -> list[str]:
-    """Silent install, then start the app again - whether that worked or not."""
-    exe = Path(sys.executable)
-    inner = (f'start /wait "" "{path}" /SILENT /SUPPRESSMSGBOXES /NORESTART '
-             f'& start "" "{exe}"')
-    return ["cmd.exe", "/c", inner]
+    """The installer's own argv: silent, no restart, and it may close the running app.
+
+    No shell: CreateProcess quotes each argument, so a path with spaces survives intact. The
+    app is started again by the installer's [Run] entry rather than by a `start` command -
+    chaining one after `cmd /c` is what produced an unquoted tail and a "cannot find" dialog.
+    """
+    return [str(Path(path)), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+            "/CLOSEAPPLICATIONS",
+            "/UPDATED=1"]      # tells the installer to start the app again afterwards
 
 
 def exit_for_update(delay: float = 1.2) -> None:
@@ -5180,8 +5200,14 @@ def apply_update() -> tuple[bool, str]:
         if error:
             _update_set(applying=False, error=error)
             return False, error
+    if not plausible_installer(path):
+        error = f"the downloaded installer is not a usable file: {str(path)!r}"
+        _update_set(applying=False, error=error)
+        return False, error
+    argv = installer_command(path)
+    log.info("starting installer: %s", argv)
     try:
-        subprocess.Popen(installer_command(path), close_fds=True,
+        subprocess.Popen(argv, close_fds=True,
                          creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     except OSError as exc:
         _update_set(applying=False, error=str(exc))

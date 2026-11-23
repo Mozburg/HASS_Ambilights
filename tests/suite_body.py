@@ -1644,6 +1644,38 @@ finally:
     (m.check_ha, m._send_now, m._autotune_attrs, m.restore_light, m.requests.post) = _orig
     m.TUNING.clear(); m.CALIBRATION_SESSION.clear()
 
+# --- the installer is launched as a program, not through a shell ----------
+import pathlib as _pathlib
+import tempfile as _tempfile
+
+_tmpdir = _pathlib.Path(_tempfile.mkdtemp(prefix="qa-installer-"))
+_fake_setup = _tmpdir / "HassAmbilights-Setup-9.9.9.exe"
+_fake_setup.write_bytes(b"MZ")            # enough for is_file(); nothing is executed here
+_argv = m.installer_command(_fake_setup)
+assert _argv[0] == str(_fake_setup), _argv
+assert "/SILENT" in _argv and "/NORESTART" in _argv, _argv
+assert not any("cmd" in part.lower() for part in _argv), (
+    f"no shell: cmd's /c quoting produced the 'cannot find \\' dialog: {_argv}")
+assert not any("&" in part for part in _argv), "no chained commands in one argument"
+
+# a path with spaces must survive as one argument
+_spaced = _tmpdir / "a folder with spaces" / "Setup.exe"
+_spaced.parent.mkdir(parents=True)
+_spaced.write_bytes(b"MZ")
+assert m.installer_command(_spaced)[0] == str(_spaced)
+
+# and anything implausible is refused rather than handed to Windows
+assert m.plausible_installer(_fake_setup) is True
+for _bad in (None, _pathlib.Path(""), _pathlib.Path("\\"), _pathlib.Path("C:"),
+             _pathlib.Path("/"), _tmpdir / "missing.exe", _tmpdir / "notes.txt"):
+    assert m.plausible_installer(_bad) is False, f"{_bad!r} must be refused"
+
+_before_applying = m.update_snapshot().get("applying")
+_ok, _why = m.apply_update()          # not Windows, and not frozen here
+assert _ok is False and _why, "apply_update must refuse off-Windows"
+assert m.update_snapshot().get("applying") == _before_applying, "and leave no stuck flag"
+print("installer ok: launched as argv, no shell, implausible paths refused")
+
 # --- update delivery: found, then actually shown ---------------------------
 _mainsrc = open(m.__file__, encoding="utf-8").read()
 _release = {"tag_name": "v9.9.9", "html_url": "https://example.invalid/r",
@@ -2430,11 +2462,19 @@ _script = _iss.read_text(encoding="utf-8")
 for piece in ("OutputBaseFilename=HassAmbilights-Setup-{#AppVersion}",
               "AppId={{7B2F4C6E-9A31-4D5E-8C7A-3F1E6D2B9C40}",
               "PrivilegesRequired=lowest", "DefaultDirName={localappdata}",
-              "CloseApplications=yes", "skipifsilent",
+              "CloseApplications=yes",
               "ArchitecturesAllowed=x64compatible",   # needs Inno 6.3+
               'Source: "..\\dist\\{#AppExe}"'):
     assert piece in _script, "the installer lost: " + piece
 assert "desktopicon" in _script and "[UninstallRun]" in _script
+# The app is restarted by the installer, not by a shell command from the app: the interactive
+# entry keeps its postinstall prompt, and a separate entry covers the silent (update) case.
+_run = _script.split("[Run]", 1)[1].split("[", 1)[0]
+assert "postinstall" in _run, "an interactive install should still offer to start the app"
+assert "UpdateRequested" in _run and "{param:UPDATED" in _script, (
+    "the update button marks its own install, and only that one restarts the app")
+assert "start /wait" not in _script and "cmd.exe" not in _script, (
+    "the installer must not be launched through cmd: its /c quoting broke the command")
 assert "reg.exe" in _script and "/v HassAmbilights /f" in _script, \
     "the uninstaller must remove the Start-with-Windows value"
 _flow = (_root / ".github" / "workflows" / "windows.yml").read_text(encoding="utf-8")

@@ -8,6 +8,25 @@ and `hass_ambilights.py --version`.
 
 ## [Unreleased]
 
+## [2.15.3] — 2026-11-22
+
+### Fixed
+- **"Windows cannot find '\'" when installing an update from the app.** The installer was
+  started through `cmd.exe /c start /wait "" "<setup>" /SILENT … & start "" "<app>"`. cmd strips
+  the first and last quote of a `/c` argument, so the quoted restart command at the end lost its
+  closing quote and the tail collapsed into something Windows tried to run literally. The
+  installer is now launched directly — `[setup, /SILENT, /SUPPRESSMSGBOXES, /NORESTART,
+  /CLOSEAPPLICATIONS, /UPDATED=1]` — which CreateProcess quotes correctly, so paths with spaces
+  survive; the restart is done by the installer's own `[Run]` entry, guarded by the `UPDATED`
+  parameter so a silent install run by hand or by CI does not launch the app behind it.
+- The downloaded file is checked before anything is executed: it must exist, end in `.exe`, and
+  not be a bare drive or root. A bad path now produces a reported error instead of a Windows
+  dialog, and the exact argv is written to the log before launch.
+
+### Upgrading
+- Install 2.15.3 by hand from the releases page: the update button in 2.15.0–2.15.2 uses the
+  broken launcher, so it cannot install this one for you. From 2.15.3 onwards the button works.
+
 ## [2.15.2] — 2026-11-22
 
 ### Fixed
